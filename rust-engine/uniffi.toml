@@ -1,0 +1,5 @@
+[bindings.kotlin]
+package_name = "uniffi.whisper_engine"
+cdylib_name = "whisper_engine"
+android = true
+android_cleaner = true

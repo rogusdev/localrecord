@@ -1,0 +1,35 @@
+[package]
+name = "whisper-engine"
+version = "0.1.0"
+edition = "2021"
+description = "On-device Whisper transcription engine for the localrecord Android app"
+
+[lib]
+name = "whisper_engine"
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+whisper-rs = { version = "0.16", features = ["log_backend"] }
+uniffi = { version = "0.32", features = ["cli"] }
+thiserror = "2"
+log = "0.4"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.15"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+env_logger = "0.11"
+
+[features]
+default = []
+# GPU-accelerated inference via ggml's Vulkan backend (Adreno on-device).
+# Requires glslc on PATH at build time (NDK ships it — see scripts/env.sh).
+vulkan = ["whisper-rs/vulkan"]
+
+[profile.release]
+lto = true
+opt-level = 3

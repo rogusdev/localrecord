@@ -1,0 +1,30 @@
+# Gradle / Android
+.gradle/
+build/
+app/build/
+local.properties
+*.apk
+*.aab
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Rust
+rust-engine/target/
+
+# Generated JNI libs and uniffi bindings (rebuilt from rust-engine)
+app/src/main/jniLibs/
+app/src/main/java/uniffi/
+
+# Models (large binaries, downloaded on first run or via script)
+*.bin
+*.gguf
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Misc
+*.log
+*.save
