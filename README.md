@@ -29,9 +29,12 @@ scripts/build-rust.sh          # Rust → app/src/main/jniLibs + uniffi Kotlin b
 `glslc` on PATH (ggml's Vulkan backend compiles its shaders with it at build
 time). `build-rust.sh` sources it automatically.
 
-Live-transcription architecture: sliding-window chunking (5 s window, 1 s
-overlap) in `rust-engine/src/session.rs` — Whisper has no native streaming.
-Windows/overlap are a first guess pending real device latency numbers.
+Live-transcription architecture: sliding-window chunking in
+`rust-engine/src/session.rs` — Whisper has no native streaming. Inference
+re-runs every 4 s of new audio over the uncommitted buffer; segments ending
+≥1 s before the buffer end are emitted and trimmed, the rest is re-transcribed
+next pass (forced commit at 20 s). Sizes are a first guess pending real device
+latency numbers.
 
 GPU/Vulkan behavior must be validated on a physical device; emulator Vulkan
 compute is unreliable.

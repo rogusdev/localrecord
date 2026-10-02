@@ -7,6 +7,9 @@ plugins {
 android {
     namespace = "com.localrecord"
     compileSdk = 36
+    // Match what scripts/setup-android-sdk.sh and scripts/env.sh install.
+    buildToolsVersion = "36.0.0"
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "com.localrecord"

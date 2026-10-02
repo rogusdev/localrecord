@@ -1,9 +1,11 @@
 package com.localrecord.engine
 
 import android.content.Context
+import android.util.Log
 import com.localrecord.model.ModelDownloader
 import uniffi.whisper_engine.EngineConfig
 import uniffi.whisper_engine.WhisperEngine
+import uniffi.whisper_engine.WhisperEngineException
 import uniffi.whisper_engine.initLogging
 
 /**
@@ -14,15 +16,15 @@ import uniffi.whisper_engine.initLogging
  */
 object EngineManager {
 
+    private const val TAG = "EngineManager"
+
     @Volatile
     private var engine: WhisperEngine? = null
 
-    val isLoaded: Boolean
-        get() = engine != null
-
     /**
      * Load the engine if the model file is present. Returns null when the
-     * model hasn't been downloaded yet. Blocking — call on Dispatchers.IO.
+     * model hasn't been downloaded yet; throws [WhisperEngineException] if it
+     * fails to load. Blocking — call off the main thread.
      */
     @Synchronized
     fun getOrLoad(context: Context): WhisperEngine? {
@@ -32,5 +34,14 @@ object EngineManager {
         initLogging()
         val config = EngineConfig(useGpu = true, numThreads = 4u, language = "en")
         return WhisperEngine(modelFile.absolutePath, config).also { engine = it }
+    }
+
+    /** Load ahead of time so the first recording doesn't wait on it. Blocking. */
+    fun preload(context: Context) {
+        try {
+            getOrLoad(context)
+        } catch (e: WhisperEngineException) {
+            Log.e(TAG, "model preload failed", e)
+        }
     }
 }

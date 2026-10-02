@@ -22,8 +22,10 @@ class MainActivity : ComponentActivity() {
 
     private val micPermission = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { grants ->
-        if (grants[Manifest.permission.RECORD_AUDIO] == true) {
+    ) {
+        // Only the mic is required. The result map holds just what was asked
+        // for, so check directly: a denied POST_NOTIFICATIONS must not block.
+        if (hasPermission(Manifest.permission.RECORD_AUDIO)) {
             viewModel.startRecording()
         }
     }
@@ -58,15 +60,16 @@ class MainActivity : ComponentActivity() {
         val needed = buildList {
             add(Manifest.permission.RECORD_AUDIO)
             add(Manifest.permission.POST_NOTIFICATIONS)
-        }.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
+        }.filterNot(::hasPermission)
         if (needed.isEmpty()) {
             viewModel.startRecording()
         } else {
             micPermission.launch(needed.toTypedArray())
         }
     }
+
+    private fun hasPermission(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
 
     private fun onDriveToggle(enabled: Boolean) {
         viewModel.setDriveBackupEnabled(enabled) { pendingIntent: PendingIntent ->

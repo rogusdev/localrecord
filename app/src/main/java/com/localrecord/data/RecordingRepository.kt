@@ -3,6 +3,9 @@ package com.localrecord.data
 import android.content.Context
 import uniffi.whisper_engine.Segment
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class Recording(
     val wavFile: File,
@@ -26,6 +29,15 @@ object RecordingRepository {
             ?: File(context.filesDir, "recordings")
         dir.mkdirs()
         return dir
+    }
+
+    /** Fresh WAV path named by start time; suffixed if that second is taken. */
+    fun newRecordingFile(context: Context): File {
+        val dir = recordingsDir(context)
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        return generateSequence(1) { it + 1 }
+            .map { n -> File(dir, if (n == 1) "rec_$stamp.wav" else "rec_${stamp}_$n.wav") }
+            .first { !it.exists() }
     }
 
     fun list(context: Context): List<Recording> =

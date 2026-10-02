@@ -1,6 +1,7 @@
 package com.localrecord.drive
 
 import android.content.Context
+import android.net.ConnectivityManager
 import android.util.Log
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -9,9 +10,12 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.localrecord.audio.RecordingState
 import com.localrecord.data.RecordingRepository
 import com.localrecord.settings.Settings
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -41,7 +45,16 @@ class DriveUploadWorker(context: Context, params: WorkerParameters) :
         private const val DRIVE_UPLOAD =
             "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable"
 
-        fun enqueue(context: Context) {
+        /**
+         * Queue an upload pass. Appends behind a pass that is already running,
+         * since that pass listed its files before the new recording existed.
+         */
+        fun enqueue(context: Context) = enqueue(context, ExistingWorkPolicy.APPEND_OR_REPLACE)
+
+        /** Re-queue with the current network setting after it changes. */
+        fun reschedule(context: Context) = enqueue(context, ExistingWorkPolicy.REPLACE)
+
+        private fun enqueue(context: Context, policy: ExistingWorkPolicy) {
             val networkType =
                 if (Settings.wifiOnlyUpload(context)) NetworkType.UNMETERED
                 else NetworkType.CONNECTED
@@ -51,7 +64,7 @@ class DriveUploadWorker(context: Context, params: WorkerParameters) :
                 )
                 .build()
             WorkManager.getInstance(context)
-                .enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, request)
+                .enqueueUniqueWork(WORK_NAME, policy, request)
         }
     }
 
@@ -66,8 +79,11 @@ class DriveUploadWorker(context: Context, params: WorkerParameters) :
         }
 
         val uploaded = Settings.uploadedFileNames(applicationContext)
+        val recording = RecordingState.activeFile
         val pending = RecordingRepository.recordingsDir(applicationContext)
-            .listFiles { f -> f.extension in setOf("wav", "txt") && f.name !in uploaded }
+            .listFiles { f ->
+                f.extension in setOf("wav", "txt") && f.name !in uploaded && f != recording
+            }
             .orEmpty()
             .sortedBy { it.name }
         if (pending.isEmpty()) return@withContext Result.success()
@@ -75,11 +91,19 @@ class DriveUploadWorker(context: Context, params: WorkerParameters) :
         return@withContext try {
             val folderId = ensureFolder(token)
             for (file in pending) {
+                // Uploads block, so check between files whether WorkManager
+                // stopped us (e.g. Wi-Fi lost) or the network became metered.
+                ensureActive()
+                if (Settings.wifiOnlyUpload(applicationContext) && isNetworkMetered()) {
+                    return@withContext Result.retry()
+                }
                 uploadFile(token, folderId, file)
                 Settings.markUploaded(applicationContext, file.name)
                 Log.i(TAG, "uploaded ${file.name}")
             }
             Result.success()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "upload failed, will retry", e)
             Result.retry()
@@ -139,6 +163,9 @@ class DriveUploadWorker(context: Context, params: WorkerParameters) :
                 check(resp.isSuccessful) { "content upload failed: HTTP ${resp.code}" }
             }
     }
+
+    private fun isNetworkMetered(): Boolean =
+        applicationContext.getSystemService(ConnectivityManager::class.java).isActiveNetworkMetered
 
     private fun authed(token: String, builder: Request.Builder): Request =
         builder.header("Authorization", "Bearer $token").build()

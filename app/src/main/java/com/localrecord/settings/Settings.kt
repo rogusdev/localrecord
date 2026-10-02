@@ -28,8 +28,9 @@ object Settings {
     fun uploadedFileNames(context: Context): Set<String> =
         prefs(context).getStringSet(KEY_UPLOADED, emptySet()) ?: emptySet()
 
+    /** Synchronous write: losing it to process death means a duplicate upload. */
     fun markUploaded(context: Context, name: String) {
         val current = uploadedFileNames(context)
-        prefs(context).edit().putStringSet(KEY_UPLOADED, current + name).apply()
+        prefs(context).edit().putStringSet(KEY_UPLOADED, current + name).commit()
     }
 }

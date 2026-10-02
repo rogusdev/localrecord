@@ -30,9 +30,10 @@ class WavWriter(
     }
 
     override fun close() {
-        raf.seek(0)
-        raf.write(buildHeader(dataBytes))
-        raf.close()
+        raf.use {
+            it.seek(0)
+            it.write(buildHeader(dataBytes))
+        }
     }
 
     private fun buildHeader(dataSize: Long): ByteArray {

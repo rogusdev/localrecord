@@ -9,12 +9,14 @@ import com.localrecord.data.Recording
 import com.localrecord.data.RecordingRepository
 import com.localrecord.drive.DriveAuth
 import com.localrecord.drive.DriveUploadWorker
+import com.localrecord.engine.EngineManager
 import com.localrecord.model.ModelDownloader
 import com.localrecord.settings.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -24,6 +26,7 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     val elapsedMs = RecordingState.elapsedMs
     val liveSegments = RecordingState.liveSegments
     val transcriptionActive = RecordingState.transcriptionActive
+    val transcriptionError = RecordingState.transcriptionError
     val modelState = ModelDownloader.state
 
     private val _recordings = MutableStateFlow<List<Recording>>(emptyList())
@@ -42,6 +45,12 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
             isRecording.collect { recording ->
                 if (!recording) refreshRecordings()
             }
+        }
+        // Load the model as soon as it's on disk so the first recording
+        // doesn't wait on it.
+        viewModelScope.launch {
+            modelState.first { it is ModelDownloader.State.Ready }
+            withContext(Dispatchers.IO) { EngineManager.preload(getApplication()) }
         }
     }
 
@@ -63,6 +72,8 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     fun setWifiOnlyUpload(wifiOnly: Boolean) {
         Settings.setWifiOnlyUpload(getApplication(), wifiOnly)
         _wifiOnlyUpload.value = wifiOnly
+        // Queued work keeps the network constraint it was enqueued with.
+        if (_driveBackupEnabled.value) DriveUploadWorker.reschedule(getApplication())
     }
 
     /**

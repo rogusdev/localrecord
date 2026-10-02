@@ -5,6 +5,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -34,6 +36,9 @@ object ModelDownloader {
     private val _state = MutableStateFlow<State>(State.NotDownloaded)
     val state: StateFlow<State> = _state.asStateFlow()
 
+    /** Serializes downloads: two writers on the same .part file corrupt the model. */
+    private val downloadLock = Mutex()
+
     fun modelFile(context: Context): File =
         File(File(context.filesDir, "models").apply { mkdirs() }, MODEL_NAME)
 
@@ -41,7 +46,9 @@ object ModelDownloader {
         if (modelFile(context).exists()) _state.value = State.Ready
     }
 
-    suspend fun download(context: Context) = withContext(Dispatchers.IO) {
+    suspend fun download(context: Context) = downloadLock.withLock { downloadLocked(context) }
+
+    private suspend fun downloadLocked(context: Context) = withContext(Dispatchers.IO) {
         val target = modelFile(context)
         if (target.exists()) {
             _state.value = State.Ready

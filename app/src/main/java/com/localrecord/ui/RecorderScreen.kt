@@ -34,6 +34,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.localrecord.RecorderViewModel
@@ -51,6 +52,7 @@ fun RecorderScreen(
     val elapsedMs by viewModel.elapsedMs.collectAsStateWithLifecycle()
     val segments by viewModel.liveSegments.collectAsStateWithLifecycle()
     val transcribing by viewModel.transcriptionActive.collectAsStateWithLifecycle()
+    val transcriptionError by viewModel.transcriptionError.collectAsStateWithLifecycle()
     val modelState by viewModel.modelState.collectAsStateWithLifecycle()
     val recordings by viewModel.recordings.collectAsStateWithLifecycle()
     val driveEnabled by viewModel.driveBackupEnabled.collectAsStateWithLifecycle()
@@ -81,9 +83,18 @@ fun RecorderScreen(
             if (isRecording) {
                 Text(
                     text = formatElapsed(elapsedMs) +
-                        if (!transcribing) "  (recording only — no model)" else "",
+                        if (!transcribing) "  (recording only)" else "",
                     style = MaterialTheme.typography.headlineMedium,
                 )
+                if (!transcribing) {
+                    Text(
+                        transcriptionError?.let { "Transcription failed to start: $it" }
+                            ?: "No speech model downloaded",
+                        color = if (transcriptionError != null) MaterialTheme.colorScheme.error
+                        else Color.Unspecified,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
                 LiveTranscript(
                     segments = segments.map { it.text },
                     modifier = Modifier.weight(1f),

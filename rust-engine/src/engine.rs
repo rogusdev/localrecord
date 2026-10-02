@@ -7,7 +7,9 @@ use whisper_rs::{
 use crate::pcm16_bytes_to_f32;
 use crate::session::LiveSession;
 
+/// Flat so Kotlin exceptions carry the Display text below as their message.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
+#[uniffi(flat_error)]
 pub enum WhisperEngineError {
     #[error("failed to load model: {msg}")]
     ModelLoad { msg: String },
@@ -81,7 +83,7 @@ impl WhisperEngine {
 
     /// Start a live sliding-window transcription session. Feed audio as it
     /// is captured, poll `drain_segments`, then `finish` to flush the tail.
-    pub fn create_live_session(self: Arc<Self>) -> Arc<LiveSession> {
+    pub fn create_live_session(self: Arc<Self>) -> Result<Arc<LiveSession>, WhisperEngineError> {
         LiveSession::spawn(self)
     }
 }
@@ -107,6 +109,9 @@ pub(crate) fn run_inference(
     params.set_print_timestamps(false);
     params.set_no_context(true);
     params.set_suppress_blank(true);
+    // Suppress non-speech tokens (as openai-whisper does by default) so
+    // silence doesn't produce "[BLANK_AUDIO]" / "(music)" annotations.
+    params.set_suppress_nst(true);
 
     state.full(params, samples).map_err(inference_err)?;
 

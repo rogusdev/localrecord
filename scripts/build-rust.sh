@@ -12,11 +12,11 @@ ABIS="${ABIS:-arm64-v8a}"
 source "$REPO_ROOT/scripts/env.sh"
 
 echo "==> Host build (for uniffi bindings generation)"
-cargo build --release --manifest-path "$REPO_ROOT/rust-engine/Cargo.toml" --lib
+cargo build --release --manifest-path "$REPO_ROOT/rust-engine/Cargo.toml" --lib --features cli
 
 echo "==> Generating Kotlin bindings"
 # run from the crate dir: uniffi-bindgen's library mode calls `cargo metadata`
-(cd "$REPO_ROOT/rust-engine" && cargo run --release --bin uniffi-bindgen -- \
+(cd "$REPO_ROOT/rust-engine" && cargo run --release --features cli --bin uniffi-bindgen -- \
     generate \
     --library target/release/libwhisper_engine.so \
     --language kotlin \

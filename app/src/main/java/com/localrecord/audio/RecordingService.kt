@@ -20,18 +20,10 @@ import com.localrecord.R
 import com.localrecord.data.RecordingRepository
 import com.localrecord.drive.DriveUploadWorker
 import com.localrecord.engine.EngineManager
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import uniffi.whisper_engine.LiveSession
+import uniffi.whisper_engine.Segment
+import uniffi.whisper_engine.WhisperEngineException
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import kotlin.concurrent.thread
 
 /**
@@ -49,11 +41,13 @@ class RecordingService : Service() {
         const val ACTION_STOP = "com.localrecord.action.STOP_RECORDING"
 
         const val SAMPLE_RATE_HZ = 16_000
+        private const val TAG = "RecordingService"
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1
         /** 100 ms of 16 kHz mono s16 audio per read. */
         private const val READ_BUFFER_BYTES = SAMPLE_RATE_HZ / 10 * 2
-        private const val SEGMENT_POLL_MS = 500L
+        /** Pull newly stable segments every 5 reads (500 ms). */
+        private const val DRAIN_EVERY_READS = 5
 
         fun start(context: Context) {
             context.startForegroundService(
@@ -68,54 +62,79 @@ class RecordingService : Service() {
         }
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile
     private var capturing = false
+    /** Alive from start until the file and transcript are finalized. Main thread only. */
     private var captureThread: Thread? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val active = captureThread?.isAlive == true
         when (intent?.action) {
-            ACTION_START -> if (!capturing) startRecording()
-            ACTION_STOP -> stopRecording()
+            ACTION_START -> if (!active) startRecording()
+            // The capture thread finalizes and stops the service itself.
+            ACTION_STOP -> if (active) capturing = false else stopSelf()
         }
         return START_NOT_STICKY
     }
 
-    @SuppressLint("MissingPermission") // UI checks RECORD_AUDIO before starting
     private fun startRecording() {
         startForeground(
             NOTIFICATION_ID,
             buildNotification(),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
         )
-
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val wavFile = File(RecordingRepository.recordingsDir(this), "rec_$timestamp.wav")
-
-        // Engine is null when the model isn't downloaded yet: record anyway,
-        // just without live transcription.
-        val session = EngineManager.getOrLoad(this)?.createLiveSession()
-        RecordingState.onRecordingStarted(transcribing = session != null)
+        val wavFile = RecordingRepository.newRecordingFile(this)
         capturing = true
-
-        captureThread = thread(name = "audio-capture") {
-            captureLoop(wavFile, session)
-        }
-
-        if (session != null) {
-            scope.launch {
-                while (isActive && capturing) {
-                    delay(SEGMENT_POLL_MS)
-                    RecordingState.appendSegments(session.drainSegments())
-                }
-            }
-        }
+        // Model load (first use) and transcription flush block; keep them off
+        // the main thread.
+        captureThread = thread(name = "audio-capture") { captureLoop(wavFile) }
     }
 
-    @SuppressLint("MissingPermission")
-    private fun captureLoop(wavFile: File, session: LiveSession?) {
+    private fun captureLoop(wavFile: File) {
+        // Engine is null when the model isn't downloaded yet: record anyway,
+        // just without live transcription. A load failure is shown in the UI.
+        var loadError: String? = null
+        val session = try {
+            EngineManager.getOrLoad(this)?.createLiveSession()
+        } catch (e: WhisperEngineException) {
+            Log.e(TAG, "live transcription unavailable", e)
+            loadError = e.message
+            null
+        }
+        RecordingState.onRecordingStarted(wavFile, transcribing = session != null, error = loadError)
+
+        val transcript = mutableListOf<Segment>()
+        val publish = { segments: List<Segment> ->
+            transcript += segments
+            RecordingState.appendSegments(segments)
+        }
+        captureAudio(wavFile, session, publish)
+
+        // Flush the transcription tail and persist the transcript.
+        if (session != null) {
+            try {
+                publish(session.finish())
+            } catch (e: WhisperEngineException) {
+                Log.e(TAG, "session.finish failed", e)
+            }
+            session.close()
+        }
+        if (transcript.isNotEmpty()) {
+            RecordingRepository.writeTranscript(wavFile, transcript)
+        }
+        RecordingState.onRecordingStopped()
+        DriveUploadWorker.enqueue(this)
+        stopSelf()
+    }
+
+    @SuppressLint("MissingPermission") // UI checks RECORD_AUDIO before starting
+    private fun captureAudio(
+        wavFile: File,
+        session: LiveSession?,
+        publish: (List<Segment>) -> Unit,
+    ) {
         val minBuffer = AudioRecord.getMinBufferSize(
             SAMPLE_RATE_HZ, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         )
@@ -126,52 +145,41 @@ class RecordingService : Service() {
             AudioFormat.ENCODING_PCM_16BIT,
             maxOf(minBuffer, READ_BUFFER_BYTES * 4),
         )
+        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+            Log.e(TAG, "AudioRecord failed to initialize")
+            recorder.release()
+            return
+        }
         val startedAt = SystemClock.elapsedRealtime()
         try {
             WavWriter(wavFile, SAMPLE_RATE_HZ).use { wav ->
                 recorder.startRecording()
                 val buffer = ByteArray(READ_BUFFER_BYTES)
+                var reads = 0
                 while (capturing) {
                     val read = recorder.read(buffer, 0, buffer.size)
-                    if (read <= 0) {
-                        Log.w("RecordingService", "AudioRecord.read returned $read")
-                        continue
+                    if (read < 0) {
+                        // Error codes (e.g. ERROR_DEAD_OBJECT) don't recover.
+                        Log.e(TAG, "AudioRecord.read returned $read; stopping")
+                        break
                     }
+                    if (read == 0) continue
                     wav.write(buffer, read)
                     session?.feedPcm16(if (read == buffer.size) buffer else buffer.copyOf(read))
                     RecordingState.onElapsed(SystemClock.elapsedRealtime() - startedAt)
+                    if (session != null && ++reads % DRAIN_EVERY_READS == 0) {
+                        publish(session.drainSegments())
+                    }
                 }
             }
         } finally {
             runCatching { recorder.stop() }
             recorder.release()
         }
-
-        // Flush the transcription tail and persist the transcript.
-        if (session != null) {
-            val remaining = runCatching { session.finish() }
-                .onFailure { Log.e("RecordingService", "session.finish failed", it) }
-                .getOrDefault(emptyList())
-            RecordingState.appendSegments(remaining)
-        }
-        val transcript = RecordingState.liveSegments.value
-        if (transcript.isNotEmpty()) {
-            RecordingRepository.writeTranscript(wavFile, transcript)
-        }
-        RecordingState.onRecordingStopped()
-        DriveUploadWorker.enqueue(this)
-        stopSelf()
-    }
-
-    private fun stopRecording() {
-        capturing = false
-        captureThread?.join(10_000)
-        captureThread = null
     }
 
     override fun onDestroy() {
         capturing = false
-        scope.cancel()
         super.onDestroy()
     }
 
