@@ -42,8 +42,9 @@ compute is unreliable.
 ## Model
 
 First run: the app offers a one-time download of `ggml-base.en-q5_1.bin`
-(~60 MB) from Hugging Face into app-private storage. Recording works without
-the model; live transcription starts once it's present.
+(~60 MB, SHA-256 verified) from Hugging Face into app-private storage.
+Recording works without the model; live transcription starts once it's
+present.
 
 ## Google Drive backup (optional, off by default)
 

@@ -198,9 +198,11 @@ impl Window {
             // Keep the tail in case speech is just starting at the edge.
             holdback_cutoff_ms
         } else {
+            // A zero-length segment is whisper's trailing guess at audio it
+            // ran out of (its text can be hallucinated); treat it as incomplete.
             let complete = segments
                 .iter()
-                .take_while(|s| s.end_ms <= holdback_cutoff_ms)
+                .take_while(|s| s.end_ms > s.start_ms && s.end_ms <= holdback_cutoff_ms)
                 .count();
             segments.truncate(complete);
             segments.last().map_or(self.start_ms(), |s| s.end_ms)
@@ -268,6 +270,14 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].end_ms, 6_500);
         assert_eq!(w.start_ms(), 6_500);
+    }
+
+    #[test]
+    fn zero_length_segment_is_not_committed() {
+        let mut w = window_of(13_000);
+        let out = w.commit(vec![seg(0, 10_000), seg(10_000, 10_000)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(w.start_ms(), 10_000);
     }
 
     #[test]

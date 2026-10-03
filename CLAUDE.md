@@ -3,61 +3,82 @@
 ## Project: Local Whisper Voice Recorder for Android
 
 A privacy-first Android voice recorder with on-device, GPU-accelerated live
-transcription (Whisper via whisper.cpp/Vulkan) and automatic Google Drive
+transcription (Whisper via whisper.cpp/Vulkan) and optional Google Drive
 backup. Built as a personal replacement for Pixel Recorder on a OnePlus 15.
 
 ## Architecture
 
-- **UI/Android layer**: Kotlin, single-activity, Jetpack Compose
-  - AudioRecord/MediaRecorder for capture, foreground service for
-    background recording
-  - WorkManager for batched/retryable Drive uploads
-  - Google Drive REST API (resumable upload), OAuth via Android Identity
-    Services
-- **Transcription engine**: Rust crate wrapping `whisper-rs`
-  (binding over whisper.cpp), built for Android via `cargo-ndk`
-  - Exposed to Kotlin via JNI (uniffi or hand-rolled JNI bridge — TBD,
-    default to uniffi unless it fights us)
-  - whisper.cpp built with Vulkan backend (`GGML_VULKAN=ON`) targeting
-    Adreno GPU on Snapdragon 8 Elite Gen 5
-- **Live transcription**: sliding-window chunking (~3-5s windows,
-  overlap to avoid word-splitting), not true streaming — Whisper has no
-  native streaming mode
-- **Model**: start with `ggml-base.en` or `small.en` quantized
-  (balance latency vs accuracy on-device); model file ships as an
-  asset or downloads once on first run (no further network use)
-
-## Repo layout (proposed)
-
-- `/app` — Kotlin/Compose Android app module
-- `/rust-engine` — Rust crate, whisper-rs wrapper, cargo-ndk build config
-- `/whisper.cpp` — vendored or submodule, Vulkan backend enabled
-- `/scripts` — build scripts (cargo-ndk invocation, NDK env setup)
+- **UI/Android layer** (`app/`): Kotlin, single-activity, Jetpack Compose
+  - `RecordingService`: foreground service; one capture thread does
+    AudioRecord (16 kHz mono PCM16) → WAV file + Rust session, drains
+    segments, flushes and writes the `.txt` transcript on stop
+  - `RecordingState`: process-wide StateFlows the UI collects (service is
+    the only writer); also exposes the active file so Drive skips it
+  - `EngineManager`: owns the single loaded model; preloaded by the
+    ViewModel once the model is on disk
+  - `DriveUploadWorker`: WorkManager, Drive REST resumable upload,
+    `drive.file` scope, OAuth via Android Identity Services
+- **Transcription engine** (`rust-engine/`): Rust crate wrapping
+  `whisper-rs` 0.16 (whisper.cpp is bundled by `whisper-rs-sys`; nothing
+  vendored here), built for Android via `cargo-ndk`
+  - Exposed to Kotlin via **uniffi** (bindings loaded through JNA),
+    generated into `app/src/main/java/uniffi/` (gitignored)
+  - `vulkan` cargo feature → ggml Vulkan backend for the Adreno GPU
+- **Live transcription** (`rust-engine/src/session.rs`): Whisper has no
+  streaming mode. A worker re-runs inference over the uncommitted buffer
+  every `STEP_MS` (4 s) of new audio; segments ending ≥ `HOLDBACK_MS` (1 s)
+  before the buffer end are emitted and the buffer is trimmed to the last
+  one's end, the rest is re-transcribed next pass. Zero-length segments are
+  whisper's (often hallucinated) guess at trailing audio and are never
+  committed. Forced commit at `MAX_WINDOW_MS` (20 s). Audio is only
+  discarded after its text is emitted or a pass found no speech.
+- **Model**: `ggml-base.en-q5_1.bin` (~60 MB), downloaded once from Hugging
+  Face (URL pinned to a revision, SHA-256 verified) into app-private
+  storage. No other network use except opt-in Drive backup.
 
 ## Build commands
 
-- Rust → Android libs: `cargo ndk -t arm64-v8a -t armeabi-v7a -o app/src/main/jniLibs build --release`
-- Android app: `./gradlew assembleDebug` (run from WSL2, NDK/SDK env vars
-  must be set — see scripts/env.sh)
+- One-time SDK/NDK: `scripts/setup-android-sdk.sh` (build-tools 36.0.0 and
+  NDK 28.2.13676358, pinned to match in `app/build.gradle.kts`)
+- Rust → `app/src/main/jniLibs` + regenerated Kotlin bindings:
+  `scripts/build-rust.sh` (arm64-v8a only by default; `ABIS="..."` to add)
+  — rerun after any change to the Rust API
+- Android app: `./gradlew assembleDebug` (run from WSL2; `scripts/env.sh`
+  sets SDK/NDK env vars)
+- Rust tests (host): `cd rust-engine && cargo test`
+- Chunking check against a real model (host, CPU):
+  `cargo run --release --example live_check -- <model.bin> <audio.raw>`
+  — prints live vs one-shot transcripts; use it when changing session.rs
+- The NDK toolchain and AGP's aapt2 are x86_64-only binaries. On an aarch64
+  host they need x86_64 glibc via `QEMU_LD_PREFIX` (enough for aapt2/Gradle
+  Kotlin compile); NDK clang still fails there, so build `jniLibs` on x86_64
 - Physical device only for GPU/Vulkan testing — emulator Vulkan compute
   is unreliable, don't trust emulator results for transcription latency
 
 ## Conventions
 
-- Rust: standard preferred conventions apply (clear error types, no
-  unwrap() in non-test code, prefer explicit over clever)
+- Rust: clear error types, no unwrap()/expect() in non-test code, prefer
+  explicit over clever. Nothing exported may panic across the FFI (mutex
+  locks recover from poisoning). `WhisperEngineError` is a uniffi
+  `flat_error`, so Kotlin gets `WhisperEngineException` with the Display
+  text as its message
 - Kotlin: keep UI layer thin; all transcription logic lives in Rust,
-  Kotlin just marshals audio buffers across JNI and renders results
+  Kotlin just marshals audio buffers across the bridge and renders results.
+  Nothing blocking (model load, `finish`, file IO) on the main thread
 - No cloud transcription fallback — if Whisper/Vulkan path fails, surface
   the error, don't silently fall back to a network service (defeats the
-  whole point of the app)
+  whole point of the app). Recording itself must keep working without
+  transcription
+- Drive Wi-Fi-only must hold at runtime too: the worker re-checks for a
+  metered network between files, and changing the setting reschedules the
+  queued work
 
 ## Open questions / decisions pending
 
-- uniffi vs hand-rolled JNI for the Rust↔Kotlin bridge
-- exact chunking window size/overlap tuning once we have real device
-  latency numbers
-- whether live transcription runs continuously during recording or only
+- Tune `STEP_MS` / `HOLDBACK_MS` / `MAX_WINDOW_MS` once we have real device
+  latency numbers; consider whisper `audio_ctx` (encoder always runs a
+  padded 30 s window otherwise) and whisper.cpp's VAD (needs a VAD model)
+- Whether live transcription runs continuously during recording or only
   on-demand post-recording (battery/thermal tradeoff — revisit Pixel 8
   overheating lesson learned)
 

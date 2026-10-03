@@ -60,7 +60,10 @@ impl WhisperEngine {
         ctx_params.use_gpu(config.use_gpu);
         let ctx = WhisperContext::new_with_params(&model_path, ctx_params)
             .map_err(|e| WhisperEngineError::ModelLoad { msg: e.to_string() })?;
-        log::info!("model loaded from {model_path} (use_gpu={})", config.use_gpu);
+        log::info!(
+            "model loaded from {model_path} (use_gpu={})",
+            config.use_gpu
+        );
         Ok(Arc::new(Self {
             ctx: Arc::new(ctx),
             config,
@@ -96,9 +99,8 @@ pub(crate) fn run_inference(
     samples: &[f32],
     base_ms: i64,
 ) -> Result<Vec<Segment>, WhisperEngineError> {
-    let inference_err = |e: whisper_rs::WhisperError| WhisperEngineError::Inference {
-        msg: e.to_string(),
-    };
+    let inference_err =
+        |e: whisper_rs::WhisperError| WhisperEngineError::Inference { msg: e.to_string() };
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     params.set_n_threads(i32::from(config.num_threads));

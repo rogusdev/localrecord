@@ -12,6 +12,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 
 /**
  * One-time download of the Whisper model file. After this completes the app
@@ -23,8 +24,11 @@ object ModelDownloader {
     // Quantized base.en: ~60 MB, good latency/accuracy starting point for
     // on-device English. Swap for small.en-q5_1 if accuracy disappoints.
     private const val MODEL_NAME = "ggml-base.en-q5_1.bin"
-    private const val MODEL_URL =
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$MODEL_NAME"
+    // Pinned to the revision that added the file, so MODEL_SHA256 stays valid.
+    private const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/" +
+        "f281eb45af861ab5e5297d23694b7d46e090c02c/$MODEL_NAME"
+    private const val MODEL_SHA256 =
+        "4baf70dd0d7c4247ba2b81fafd9c01005ac77c2f9ef064e00dcf195d0e2fdd2f"
 
     sealed interface State {
         data object NotDownloaded : State
@@ -63,6 +67,7 @@ object ModelDownloader {
                 if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}")
                 val body = resp.body ?: throw IOException("empty body")
                 val total = body.contentLength()
+                val sha256 = MessageDigest.getInstance("SHA-256")
                 body.byteStream().use { input ->
                     tmp.outputStream().use { output ->
                         val buffer = ByteArray(256 * 1024)
@@ -71,6 +76,7 @@ object ModelDownloader {
                             val read = input.read(buffer)
                             if (read < 0) break
                             output.write(buffer, 0, read)
+                            sha256.update(buffer, 0, read)
                             copied += read
                             if (total > 0) {
                                 _state.value = State.Downloading((copied * 100 / total).toInt())
@@ -78,6 +84,8 @@ object ModelDownloader {
                         }
                     }
                 }
+                val actual = sha256.digest().joinToString("") { "%02x".format(it) }
+                if (actual != MODEL_SHA256) throw IOException("checksum mismatch")
             }
             if (!tmp.renameTo(target)) throw IOException("rename failed")
             _state.value = State.Ready

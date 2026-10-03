@@ -5,10 +5,13 @@ import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+private const val HEADER_BYTES = 44L
+private const val BITS_PER_SAMPLE = 16
+
 /**
- * Streams s16le PCM into a WAV file, patching the RIFF header sizes on
- * close. Header is written up front with placeholder sizes so the file is
- * playable even after a crash (most players tolerate the wrong size).
+ * Streams s16le PCM into a WAV file. The RIFF header sizes are re-patched
+ * after every ~1 s of audio and on close, so a recording cut short by a crash
+ * is still a valid WAV missing at most its last second.
  */
 class WavWriter(
     file: File,
@@ -17,30 +20,37 @@ class WavWriter(
 ) : AutoCloseable {
 
     private val raf = RandomAccessFile(file, "rw")
+    private val byteRate = sampleRateHz * channels * BITS_PER_SAMPLE / 8
     private var dataBytes = 0L
+    private var headerDataBytes = 0L
 
     init {
         raf.setLength(0)
-        raf.write(buildHeader(0))
+        writeHeader()
     }
 
     fun write(pcm: ByteArray, length: Int = pcm.size) {
         raf.write(pcm, 0, length)
         dataBytes += length
-    }
-
-    override fun close() {
-        raf.use {
-            it.seek(0)
-            it.write(buildHeader(dataBytes))
+        if (dataBytes - headerDataBytes >= byteRate) {
+            writeHeader()
+            raf.seek(HEADER_BYTES + dataBytes)
         }
     }
 
+    override fun close() {
+        raf.use { writeHeader() }
+    }
+
+    private fun writeHeader() {
+        raf.seek(0)
+        raf.write(buildHeader(dataBytes))
+        headerDataBytes = dataBytes
+    }
+
     private fun buildHeader(dataSize: Long): ByteArray {
-        val bitsPerSample = 16
-        val byteRate = sampleRateHz * channels * bitsPerSample / 8
-        val blockAlign = channels * bitsPerSample / 8
-        return ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN).apply {
+        val blockAlign = channels * BITS_PER_SAMPLE / 8
+        return ByteBuffer.allocate(HEADER_BYTES.toInt()).order(ByteOrder.LITTLE_ENDIAN).apply {
             put("RIFF".toByteArray(Charsets.US_ASCII))
             putInt((36 + dataSize).toInt())
             put("WAVE".toByteArray(Charsets.US_ASCII))
@@ -51,7 +61,7 @@ class WavWriter(
             putInt(sampleRateHz)
             putInt(byteRate)
             putShort(blockAlign.toShort())
-            putShort(bitsPerSample.toShort())
+            putShort(BITS_PER_SAMPLE.toShort())
             put("data".toByteArray(Charsets.US_ASCII))
             putInt(dataSize.toInt())
         }.array()
