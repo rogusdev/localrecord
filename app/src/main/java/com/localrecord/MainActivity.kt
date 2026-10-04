@@ -40,10 +40,12 @@ class MainActivity : ComponentActivity() {
             ) {
                 val playback by viewModel.playback.collectAsStateWithLifecycle()
                 val finalizing by viewModel.finalizing.collectAsStateWithLifecycle()
+                val finalizeErrors by viewModel.finalizeErrors.collectAsStateWithLifecycle()
                 playback?.let {
                     PlaybackScreen(
                         it,
                         finalizing = it.recording.wavFile.name in finalizing,
+                        finalizeError = finalizeErrors[it.recording.wavFile.name],
                         onTranscribeAgain = { viewModel.transcribeAgain(it.recording) },
                         onBack = viewModel::closePlayback,
                     )

@@ -65,6 +65,8 @@ private class SegmentText(val text: String, val wordRanges: List<IntRange>)
 fun PlaybackScreen(
     playback: Playback,
     finalizing: Boolean,
+    /** Why the last "Transcribe again" (or post-recording pass) failed. */
+    finalizeError: String?,
     onTranscribeAgain: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -107,17 +109,27 @@ fun PlaybackScreen(
             )
         },
     ) { padding ->
-        Box(
+        Column(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .padding(horizontal = 16.dp)
         ) {
-            val transcript = playback.transcript
-            when {
-                transcript == null -> Text("No transcript for this recording")
-                transcript.isEmpty() -> Text("No speech was transcribed")
-                else -> Transcript(transcript, positionMs, onSeek = player::seekTo)
+            if (finalizeError != null && !finalizing) {
+                Text(
+                    "Transcription failed: $finalizeError",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+            Box(Modifier.weight(1f)) {
+                val transcript = playback.transcript
+                when {
+                    transcript == null -> Text("No transcript for this recording")
+                    transcript.isEmpty() -> Text("No speech was transcribed")
+                    else -> Transcript(transcript, positionMs, onSeek = player::seekTo)
+                }
             }
         }
     }

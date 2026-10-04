@@ -69,6 +69,7 @@ fun RecorderScreen(
     val modelState by viewModel.modelState.collectAsStateWithLifecycle()
     val recordings by viewModel.recordings.collectAsStateWithLifecycle()
     val finalizing by viewModel.finalizing.collectAsStateWithLifecycle()
+    val finalizeErrors by viewModel.finalizeErrors.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
     val importing by viewModel.importing.collectAsStateWithLifecycle()
     // Any type: providers label .vtt inconsistently; the import checks extensions.
@@ -156,6 +157,7 @@ fun RecorderScreen(
                         RecordingRow(
                             rec,
                             finalizing = rec.wavFile.name in finalizing,
+                            finalizeFailed = rec.wavFile.name in finalizeErrors,
                             onOpen = { viewModel.openPlayback(rec) },
                             onDelete = { pendingDelete = rec },
                         )
@@ -263,6 +265,7 @@ internal fun speakerName(speaker: UInt): String = "Speaker ${speaker + 1u}"
 private fun RecordingRow(
     recording: Recording,
     finalizing: Boolean,
+    finalizeFailed: Boolean,
     onOpen: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -279,6 +282,7 @@ private fun RecordingRow(
             Text(
                 formatElapsed(recording.durationApproxMs) + when {
                     finalizing -> " · finalizing transcript…"
+                    finalizeFailed -> " · transcription failed"
                     recording.transcriptFile != null -> " · transcribed"
                     else -> ""
                 },

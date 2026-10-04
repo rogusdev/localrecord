@@ -26,6 +26,7 @@ import uniffi.whisper_engine.LiveSession
 import uniffi.whisper_engine.Segment
 import uniffi.whisper_engine.WhisperEngineException
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
@@ -186,7 +187,11 @@ class RecordingService : Service() {
     /** Replace the live draft with a whole-recording pass. Blocking; finalizer thread. */
     private fun finalizeTranscript(wavFile: File) {
         try {
-            val engine = EngineManager.finalEngineOrLoad(this) ?: return
+            val engine = EngineManager.finalEngineOrLoad(this)
+            if (engine == null) {
+                RecordingState.onFinalizeFailed(wavFile, "speech models aren't downloaded")
+                return
+            }
             val segments = engine.transcribeWav(wavFile.path, EngineManager.speakersOrLoad(this))
             // An empty final pass over audio the draft found speech in is
             // more likely a failure than the truth; keep the draft then.
@@ -195,6 +200,10 @@ class RecordingService : Service() {
             }
         } catch (e: WhisperEngineException) {
             Log.e(TAG, "final pass failed for ${wavFile.name}; keeping the live transcript", e)
+            RecordingState.onFinalizeFailed(wavFile, e.message ?: "transcription failed")
+        } catch (e: IOException) {
+            Log.e(TAG, "can't save the transcript of ${wavFile.name}", e)
+            RecordingState.onFinalizeFailed(wavFile, "can't save the transcript: ${e.message}")
         }
     }
 

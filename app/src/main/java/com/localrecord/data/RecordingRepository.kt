@@ -78,8 +78,9 @@ object RecordingRepository {
         }
     }
 
+    /** Deletes the .wav and its .vtt, including one written since [list] ran. */
     fun delete(recording: Recording) {
         recording.wavFile.delete()
-        recording.transcriptFile?.delete()
+        transcriptFileFor(recording.wavFile).delete()
     }
 }

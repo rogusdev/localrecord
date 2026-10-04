@@ -33,6 +33,10 @@ object RecordingState {
     private val _finalizing = MutableStateFlow<Set<String>>(emptySet())
     val finalizing: StateFlow<Set<String>> = _finalizing.asStateFlow()
 
+    /** Why a recording's (WAV name's) last final pass failed; cleared when it's queued again. */
+    private val _finalizeErrors = MutableStateFlow<Map<String, String>>(emptyMap())
+    val finalizeErrors: StateFlow<Map<String, String>> = _finalizeErrors.asStateFlow()
+
     /** Why transcription is off although the model is present (load or backend failure). */
     private val _transcriptionError = MutableStateFlow<String?>(null)
     val transcriptionError: StateFlow<String?> = _transcriptionError.asStateFlow()
@@ -57,7 +61,12 @@ object RecordingState {
     }
 
     internal fun onFinalizing(wavFile: File, running: Boolean) {
+        if (running) _finalizeErrors.update { it - wavFile.name }
         _finalizing.update { if (running) it + wavFile.name else it - wavFile.name }
+    }
+
+    internal fun onFinalizeFailed(wavFile: File, error: String) {
+        _finalizeErrors.update { it + (wavFile.name to error) }
     }
 
     internal fun setTentative(segments: List<Segment>) {

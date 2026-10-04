@@ -7,10 +7,12 @@ use crate::session::SAMPLE_RATE_HZ;
 
 const PCM_FORMAT: u16 = 1;
 
-/// Samples of a 16 kHz mono 16-bit WAV as f32 in [-1, 1).
+/// Samples of a 16 kHz mono 16-bit WAV as f32 in [-1, 1). Errors name the
+/// file, not its path: they're shown in the UI.
 pub(crate) fn read_pcm16_mono_16k(path: &Path) -> Result<Vec<f32>, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+    let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+    let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
+    parse(&bytes).map_err(|e| format!("{name}: {e}"))
 }
 
 fn parse(bytes: &[u8]) -> Result<Vec<f32>, String> {
