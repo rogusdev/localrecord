@@ -15,8 +15,9 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
     segments, flushes and writes the live transcript on stop as a draft: a
     WebVTT `.vtt`: a cue per segment, speaker as `<v Speaker n>`, an inline
     start timestamp before every word; playback reads it back
-    (`RecordingRepository`). Then a single-thread queue runs the final pass
-    (`transcribe_wav` with small.en) and overwrites the draft; the service
+    (`RecordingRepository` does the file IO, Rust's `vtt.rs` the format).
+    Then a single-thread queue runs the final pass (`transcribe_wav` with
+    small.en) and overwrites the draft; the service
     stays foreground (mediaProcessing, dataSync before Android 15) until the
     queue drains. Playback's "Transcribe again" queues the same pass
   - `RecordingState`: process-wide StateFlows the UI collects (service is
@@ -45,6 +46,8 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
     repetition loop on the phone), drops word-for-word repeated segments
     (loop safety net), then `speakers::label_recording` (live-style
     matching, then each segment moved to its nearest final speaker)
+  - `src/vtt.rs`: the transcript file format: `transcript_to_vtt` /
+    `transcript_from_vtt` (exported to Kotlin)
   - `src/speakers.rs`: live speaker labels. Each committed segment's audio
     gets a voiceprint (sherpa-onnx, 3D-Speaker CAM++ "zh_en common advanced")
     matched to the session's speakers

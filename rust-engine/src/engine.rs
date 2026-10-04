@@ -41,6 +41,8 @@ pub enum WhisperEngineError {
     AudioFile { msg: String },
     #[error("live session already finished")]
     SessionFinished,
+    #[error("can't read transcript: {msg}")]
+    Transcript { msg: String },
 }
 
 #[derive(Clone, Debug, uniffi::Record)]

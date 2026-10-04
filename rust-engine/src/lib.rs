@@ -12,11 +12,13 @@ mod engine;
 mod native;
 mod session;
 mod speakers;
+mod vtt;
 mod wav;
 
 pub use engine::{EngineConfig, Segment, WhisperEngine, WhisperEngineError, Word};
 pub use session::LiveSession;
 pub use speakers::SpeakerEncoder;
+pub use vtt::{transcript_from_vtt, transcript_to_vtt};
 
 /// Route whisper.cpp / engine logs to logcat (or env_logger on host).
 /// Call once from Kotlin before creating an engine.
