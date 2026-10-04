@@ -13,7 +13,8 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   - `RecordingService`: foreground service; one capture thread does
     AudioRecord (16 kHz mono PCM16) → WAV file + Rust session, drains
     segments, flushes and writes the live transcript on stop as a draft: a
-    readable `.txt` plus a `.json` with segment/word/speaker timings
+    WebVTT `.vtt`: a cue per segment, speaker as `<v Speaker n>`, an inline
+    start timestamp before every word; playback reads it back
     (`RecordingRepository`). Then a single-thread queue runs the final pass
     (`transcribe_wav` with small.en) and overwrites the draft; the service
     stays foreground (mediaProcessing, dataSync before Android 15) until the
@@ -24,9 +25,9 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
     speaker model, preloaded by the ViewModel; final engine (small.en)
     loaded on the first final pass
   - `Player` + `PlaybackScreen`: MediaPlayer playback; highlights the word
-    at the play position from the `.json` timings (whole segments for older
-    `.txt`-only recordings); tap a word or timestamp to seek
-  - Sharing: `shareRecording` sends the `.wav`, `.txt` and `.json` through a
+    at the play position from the `.vtt` word timestamps; tap a word or
+    timestamp to seek
+  - Sharing: `shareRecording` sends the `.wav` and `.vtt` through a
     FileProvider to the share sheet. No Drive API/OAuth on purpose: that
     needs a Google Cloud project
 - **Transcription engine** (`rust-engine/`): Rust crate over

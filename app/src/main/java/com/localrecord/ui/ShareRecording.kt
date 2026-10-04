@@ -10,12 +10,12 @@ import com.localrecord.data.Recording
 private const val FILE_PROVIDER_SUFFIX = ".files"
 
 /**
- * Opens the system share sheet with a recording's audio, transcript and
- * timings, so any installed app can take them (e.g. Drive's "Save to Drive").
+ * Opens the system share sheet with a recording's audio and transcript,
+ * so any installed app can take them (e.g. Drive's "Save to Drive").
  */
 fun shareRecording(context: Context, recording: Recording) {
     val authority = context.packageName + FILE_PROVIDER_SUFFIX
-    val uris = listOfNotNull(recording.wavFile, recording.transcriptFile, recording.timingsFile)
+    val uris = listOfNotNull(recording.wavFile, recording.transcriptFile)
         .map { FileProvider.getUriForFile(context, authority, it) }
     val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
         type = if (uris.size == 1) "audio/wav" else "*/*"

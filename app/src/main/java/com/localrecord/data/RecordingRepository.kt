@@ -1,10 +1,6 @@
 package com.localrecord.data
 
 import android.content.Context
-import android.util.Log
-import org.json.JSONArray
-import org.json.JSONException
-import org.json.JSONObject
 import uniffi.whisper_engine.Segment
 import uniffi.whisper_engine.Word
 import java.io.File
@@ -15,8 +11,6 @@ import java.util.Locale
 data class Recording(
     val wavFile: File,
     val transcriptFile: File?,
-    /** Word/speaker timings for playback; absent for older recordings. */
-    val timingsFile: File?,
     val durationApproxMs: Long,
 ) {
     val name: String get() = wavFile.nameWithoutExtension
@@ -24,16 +18,25 @@ data class Recording(
 
 /**
  * Recordings live in app-external storage (user-visible via file managers,
- * removed on uninstall): one .wav plus optional siblings — a readable .txt
- * transcript and a .json copy with segment/word timings for playback.
+ * removed on uninstall): one .wav plus an optional WebVTT (.vtt) transcript.
+ * Each cue is a segment; its words carry inline start timestamps, which
+ * playback reads back.
  */
 object RecordingRepository {
 
-    private const val TAG = "RecordingRepository"
     private const val WAV_HEADER_BYTES = 44L
     private const val BYTES_PER_MS = 32L // 16 kHz mono s16
-    /** A .txt transcript line: "[mm:ss → mm:ss] Speaker n: text", speaker optional. */
-    private val TXT_LINE = Regex("""^\[(\d+):(\d{2}) → (\d+):(\d{2})] (?:Speaker (\d+): )?(.*)$""")
+    /** Cue timing line: "hh:mm:ss.mmm --> hh:mm:ss.mmm", optional cue settings after. */
+    private val VTT_TIMING = Regex("""^(\S+) --> (\S+)""")
+    /** Leading voice span naming the speaker, 1-based. */
+    private val VTT_VOICE = Regex("""^<v Speaker (\d+)>""")
+    /** Inline word start timestamp. */
+    private val VTT_WORD_START = Regex("""<(\d+:\d{2}:\d{2}\.\d{3})>""")
+    private val VTT_TIMESTAMP = Regex("""(\d+):(\d{2}):(\d{2})\.(\d{3})""")
+    /** Blank line(s) between cues. */
+    private val VTT_CUE_SEPARATOR = Regex("""\n\s*\n""")
+    /** Line breaks inside segment text; a cue's text can't hold blank lines. */
+    private val LINE_BREAK = Regex("""\s*\n\s*""")
 
     fun recordingsDir(context: Context): File {
         val dir = context.getExternalFilesDir("recordings")
@@ -60,97 +63,90 @@ object RecordingRepository {
                 Recording(
                     wavFile = wav,
                     transcriptFile = transcriptFileFor(wav).takeIf { it.exists() },
-                    timingsFile = timingsFileFor(wav).takeIf { it.exists() },
                     durationApproxMs = (wav.length() - WAV_HEADER_BYTES).coerceAtLeast(0) / BYTES_PER_MS,
                 )
             }
 
     fun transcriptFileFor(wavFile: File): File =
-        File(wavFile.parentFile, "${wavFile.nameWithoutExtension}.txt")
-
-    private fun timingsFileFor(wavFile: File): File =
-        File(wavFile.parentFile, "${wavFile.nameWithoutExtension}.json")
+        File(wavFile.parentFile, "${wavFile.nameWithoutExtension}.vtt")
 
     fun writeTranscript(wavFile: File, segments: List<Segment>) {
-        val text = segments.joinToString("\n") { seg ->
-            val speaker = seg.speaker?.let { "Speaker ${it + 1u}: " }.orEmpty()
-            "[${formatMs(seg.startMs)} → ${formatMs(seg.endMs)}] $speaker${seg.text}"
-        }
-        transcriptFileFor(wavFile).writeText(text)
-        timingsFileFor(wavFile).writeText(toJson(segments).toString())
+        transcriptFileFor(wavFile).writeText(toVtt(segments))
     }
 
-    /**
-     * The saved transcript: word timings from the .json, else whole-second
-     * segment times from the .txt (recordings made before word timings).
-     * Null if there is neither. Blocking file IO.
-     */
+    /** The saved transcript; null if there is none. Blocking file IO. */
     fun readTranscript(wavFile: File): List<Segment>? {
-        val json = timingsFileFor(wavFile)
-        if (json.exists()) {
-            try {
-                return fromJson(JSONObject(json.readText()))
-            } catch (e: JSONException) {
-                Log.w(TAG, "unreadable ${json.name}; falling back to .txt", e)
-            }
-        }
-        val txt = transcriptFileFor(wavFile)
-        if (!txt.exists()) return null
-        return txt.readLines().mapNotNull { line ->
-            TXT_LINE.matchEntire(line)?.destructured?.let { (m0, s0, m1, s1, speaker, text) ->
-                Segment(
-                    startMs = (m0.toLong() * 60 + s0.toLong()) * 1000,
-                    endMs = (m1.toLong() * 60 + s1.toLong()) * 1000,
-                    text = text,
-                    words = emptyList(),
-                    speaker = speaker.toUIntOrNull()?.takeIf { it > 0u }?.minus(1u),
-                )
-            }
-        }
+        val vtt = transcriptFileFor(wavFile)
+        if (!vtt.exists()) return null
+        return fromVtt(vtt.readText())
     }
 
     fun delete(recording: Recording) {
         recording.wavFile.delete()
         recording.transcriptFile?.delete()
-        timingsFileFor(recording.wavFile).delete()
     }
 
-    private fun toJson(segments: List<Segment>): JSONObject {
-        fun span(startMs: Long, endMs: Long, text: String) = JSONObject()
-            .put("start_ms", startMs)
-            .put("end_ms", endMs)
-            .put("text", text)
-        val array = JSONArray()
+    /**
+     * One cue per segment, speaker as a voice span, every word preceded by
+     * its start time: `<v Speaker 1><00:00:01.240>Hello <00:00:01.900>there.`
+     * Word end times aren't stored; a word ends where the next starts.
+     */
+    private fun toVtt(segments: List<Segment>): String = buildString {
+        append("WEBVTT\n")
         for (seg in segments) {
-            val words = JSONArray()
-            seg.words.forEach { words.put(span(it.startMs, it.endMs, it.text)) }
-            val json = span(seg.startMs, seg.endMs, seg.text).put("words", words)
-            seg.speaker?.let { json.put("speaker", it.toLong()) }
-            array.put(json)
+            val voice = seg.speaker?.let { "<v Speaker ${it + 1u}>" }.orEmpty()
+            val text = if (seg.words.isEmpty()) {
+                escapeVtt(seg.text.trim().replace(LINE_BREAK, " "))
+            } else {
+                seg.words.joinToString(" ") { "<${vttTimestamp(it.startMs)}>${escapeVtt(it.text)}" }
+            }
+            append("\n${vttTimestamp(seg.startMs)} --> ${vttTimestamp(seg.endMs)}\n$voice$text\n")
         }
-        return JSONObject().put("segments", array)
     }
 
-    private fun fromJson(json: JSONObject): List<Segment> {
-        val segments = json.getJSONArray("segments")
-        return (0 until segments.length()).map { i ->
-            val seg = segments.getJSONObject(i)
-            val words = seg.getJSONArray("words")
+    /** Parses what [toVtt] writes; cues it can't read are skipped. */
+    private fun fromVtt(vtt: String): List<Segment> =
+        vtt.replace("\r\n", "\n").split(VTT_CUE_SEPARATOR).mapNotNull { block ->
+            val lines = block.lines()
+            val timing = lines.indexOfFirst { "-->" in it }
+            if (timing < 0) return@mapNotNull null
+            val (start, end) = VTT_TIMING.find(lines[timing])?.destructured ?: return@mapNotNull null
+            val startMs = parseVttTimestamp(start) ?: return@mapNotNull null
+            val endMs = parseVttTimestamp(end) ?: return@mapNotNull null
+            var cue = lines.drop(timing + 1).joinToString(" ").trim().removeSuffix("</v>")
+            val voice = VTT_VOICE.find(cue)
+            if (voice != null) cue = cue.substring(voice.range.last + 1)
+            val starts = VTT_WORD_START.findAll(cue).toList()
+            val words = starts.mapIndexed { i, match ->
+                val textEnd = starts.getOrNull(i + 1)?.range?.first ?: cue.length
+                Word(
+                    startMs = parseVttTimestamp(match.groupValues[1]) ?: startMs,
+                    endMs = starts.getOrNull(i + 1)?.let { parseVttTimestamp(it.groupValues[1]) } ?: endMs,
+                    text = unescapeVtt(cue.substring(match.range.last + 1, textEnd).trim()),
+                )
+            }
             Segment(
-                startMs = seg.getLong("start_ms"),
-                endMs = seg.getLong("end_ms"),
-                text = seg.getString("text"),
-                words = (0 until words.length()).map { j ->
-                    val word = words.getJSONObject(j)
-                    Word(word.getLong("start_ms"), word.getLong("end_ms"), word.getString("text"))
-                },
-                speaker = if (seg.has("speaker")) seg.getLong("speaker").toUInt() else null,
+                startMs = startMs,
+                endMs = endMs,
+                text = if (words.isEmpty()) unescapeVtt(cue) else words.joinToString(" ") { it.text },
+                words = words,
+                speaker = voice?.groupValues?.get(1)?.toUIntOrNull()?.takeIf { it > 0u }?.minus(1u),
             )
         }
+
+    /** hh:mm:ss.mmm */
+    private fun vttTimestamp(ms: Long): String =
+        "%02d:%02d:%02d.%03d".format(ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+
+    private fun parseVttTimestamp(text: String): Long? {
+        val (h, m, s, ms) = VTT_TIMESTAMP.matchEntire(text)?.destructured ?: return null
+        return ((h.toLong() * 60 + m.toLong()) * 60 + s.toLong()) * 1000 + ms.toLong()
     }
 
-    private fun formatMs(ms: Long): String {
-        val totalSeconds = ms / 1000
-        return "%02d:%02d".format(totalSeconds / 60, totalSeconds % 60)
-    }
+    /** Cue text can't hold a raw "-->", "<" or "&". */
+    private fun escapeVtt(text: String): String =
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    private fun unescapeVtt(text: String): String =
+        text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 }

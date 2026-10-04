@@ -50,5 +50,5 @@ present.
 ## Sharing / backup
 
 Each recording has a Share button (list and playback screen) that hands the
-`.wav`, `.txt` and `.json` (word timings, speaker labels) to the system share
-sheet — pick Drive's "Save to Drive" to back it up.
+`.wav` and a WebVTT `.vtt` transcript (speaker labels, per-word start times)
+to the system share sheet — pick Drive's "Save to Drive" to back it up.
