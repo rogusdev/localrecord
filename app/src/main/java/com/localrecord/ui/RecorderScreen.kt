@@ -46,6 +46,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.localrecord.RecorderViewModel
 import com.localrecord.data.Recording
 import com.localrecord.model.ModelDownloader
+import uniffi.whisper_engine.Segment
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -108,10 +109,7 @@ fun RecorderScreen(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
-                LiveTranscript(
-                    segments = segments.map { it.text },
-                    modifier = Modifier.weight(1f),
-                )
+                LiveTranscript(segments = segments, modifier = Modifier.weight(1f))
             } else {
                 Text("Recordings", style = MaterialTheme.typography.titleMedium)
                 LazyColumn(modifier = Modifier.weight(1f)) {
@@ -135,11 +133,11 @@ private fun ModelCard(state: ModelDownloader.State, onDownload: () -> Unit) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             when (state) {
                 is ModelDownloader.State.NotDownloaded -> {
-                    Text("Speech model not downloaded (~60 MB, one time). Recording works without it, but live transcription needs it.")
-                    TextButton(onClick = onDownload) { Text("Download model") }
+                    Text("Speech models not downloaded (~${state.megabytes} MB, one time). Recording works without them, but live transcription and speaker labels need them.")
+                    TextButton(onClick = onDownload) { Text("Download models") }
                 }
                 is ModelDownloader.State.Downloading -> {
-                    Text("Downloading model… ${state.progressPercent}%")
+                    Text("Downloading models… ${state.progressPercent}%")
                     LinearProgressIndicator(
                         progress = { state.progressPercent / 100f },
                         modifier = Modifier.fillMaxWidth(),
@@ -156,18 +154,37 @@ private fun ModelCard(state: ModelDownloader.State, onDownload: () -> Unit) {
 }
 
 @Composable
-private fun LiveTranscript(segments: List<String>, modifier: Modifier = Modifier) {
+private fun LiveTranscript(segments: List<Segment>, modifier: Modifier = Modifier) {
     val listState = rememberLazyListState()
     LaunchedEffect(segments.size) {
         if (segments.isNotEmpty()) listState.animateScrollToItem(segments.size - 1)
     }
     LazyColumn(state = listState, modifier = modifier) {
         items(segments.size) { i ->
-            Text(segments[i], style = MaterialTheme.typography.bodyLarge)
+            if (speakerChanged(segments, i)) SpeakerLabel(segments[i].speaker)
+            Text(segments[i].text, style = MaterialTheme.typography.bodyLarge)
             Spacer(Modifier.height(4.dp))
         }
     }
 }
+
+/** Whether segment [i] starts a new speaker's turn (always for a labelled first segment). */
+internal fun speakerChanged(segments: List<Segment>, i: Int): Boolean =
+    segments[i].speaker != null && segments[i].speaker != segments.getOrNull(i - 1)?.speaker
+
+@Composable
+internal fun SpeakerLabel(speaker: UInt?, modifier: Modifier = Modifier) {
+    if (speaker == null) return
+    Text(
+        speakerName(speaker),
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = modifier.padding(top = 8.dp, bottom = 2.dp),
+    )
+}
+
+/** Display name for a 0-based speaker index. */
+internal fun speakerName(speaker: UInt): String = "Speaker ${speaker + 1u}"
 
 @Composable
 private fun RecordingRow(recording: Recording, onOpen: () -> Unit, onDelete: () -> Unit) {

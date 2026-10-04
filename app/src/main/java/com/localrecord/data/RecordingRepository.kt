@@ -15,6 +15,8 @@ import java.util.Locale
 data class Recording(
     val wavFile: File,
     val transcriptFile: File?,
+    /** Word/speaker timings for playback; absent for older recordings. */
+    val timingsFile: File?,
     val durationApproxMs: Long,
 ) {
     val name: String get() = wavFile.nameWithoutExtension
@@ -30,8 +32,8 @@ object RecordingRepository {
     private const val TAG = "RecordingRepository"
     private const val WAV_HEADER_BYTES = 44L
     private const val BYTES_PER_MS = 32L // 16 kHz mono s16
-    /** A .txt transcript line: "[mm:ss → mm:ss] text". */
-    private val TXT_LINE = Regex("""^\[(\d+):(\d{2}) → (\d+):(\d{2})] (.*)$""")
+    /** A .txt transcript line: "[mm:ss → mm:ss] Speaker n: text", speaker optional. */
+    private val TXT_LINE = Regex("""^\[(\d+):(\d{2}) → (\d+):(\d{2})] (?:Speaker (\d+): )?(.*)$""")
 
     fun recordingsDir(context: Context): File {
         val dir = context.getExternalFilesDir("recordings")
@@ -58,6 +60,7 @@ object RecordingRepository {
                 Recording(
                     wavFile = wav,
                     transcriptFile = transcriptFileFor(wav).takeIf { it.exists() },
+                    timingsFile = timingsFileFor(wav).takeIf { it.exists() },
                     durationApproxMs = (wav.length() - WAV_HEADER_BYTES).coerceAtLeast(0) / BYTES_PER_MS,
                 )
             }
@@ -70,7 +73,8 @@ object RecordingRepository {
 
     fun writeTranscript(wavFile: File, segments: List<Segment>) {
         val text = segments.joinToString("\n") { seg ->
-            "[${formatMs(seg.startMs)} → ${formatMs(seg.endMs)}] ${seg.text}"
+            val speaker = seg.speaker?.let { "Speaker ${it + 1u}: " }.orEmpty()
+            "[${formatMs(seg.startMs)} → ${formatMs(seg.endMs)}] $speaker${seg.text}"
         }
         transcriptFileFor(wavFile).writeText(text)
         timingsFileFor(wavFile).writeText(toJson(segments).toString())
@@ -93,12 +97,13 @@ object RecordingRepository {
         val txt = transcriptFileFor(wavFile)
         if (!txt.exists()) return null
         return txt.readLines().mapNotNull { line ->
-            TXT_LINE.matchEntire(line)?.destructured?.let { (m0, s0, m1, s1, text) ->
+            TXT_LINE.matchEntire(line)?.destructured?.let { (m0, s0, m1, s1, speaker, text) ->
                 Segment(
                     startMs = (m0.toLong() * 60 + s0.toLong()) * 1000,
                     endMs = (m1.toLong() * 60 + s1.toLong()) * 1000,
                     text = text,
                     words = emptyList(),
+                    speaker = speaker.toUIntOrNull()?.takeIf { it > 0u }?.minus(1u),
                 )
             }
         }
@@ -119,7 +124,9 @@ object RecordingRepository {
         for (seg in segments) {
             val words = JSONArray()
             seg.words.forEach { words.put(span(it.startMs, it.endMs, it.text)) }
-            array.put(span(seg.startMs, seg.endMs, seg.text).put("words", words))
+            val json = span(seg.startMs, seg.endMs, seg.text).put("words", words)
+            seg.speaker?.let { json.put("speaker", it.toLong()) }
+            array.put(json)
         }
         return JSONObject().put("segments", array)
     }
@@ -137,6 +144,7 @@ object RecordingRepository {
                     val word = words.getJSONObject(j)
                     Word(word.getLong("start_ms"), word.getLong("end_ms"), word.getString("text"))
                 },
+                speaker = if (seg.has("speaker")) seg.getLong("speaker").toUInt() else null,
             )
         }
     }

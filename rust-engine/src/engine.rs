@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::native::{Context, FullParams, NativeError, State};
 use crate::session::LiveSession;
+use crate::speakers::SpeakerEncoder;
 use crate::{lock, pcm16_bytes_to_f32};
 
 /// Read by ggml when it creates the Vulkan device (first model load). On the
@@ -56,6 +57,8 @@ pub struct Segment {
     /// Word timings from whisper's token timestamps: approximate (whisper.cpp
     /// estimates them from token probabilities), within the segment's span.
     pub words: Vec<Word>,
+    /// 0-based speaker within the session; None without a speaker model.
+    pub speaker: Option<u32>,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -118,8 +121,12 @@ impl WhisperEngine {
 
     /// Start a live sliding-window transcription session. Feed audio as it
     /// is captured, poll `drain_segments`, then `finish` to flush the tail.
-    pub fn create_live_session(self: Arc<Self>) -> Result<Arc<LiveSession>, WhisperEngineError> {
-        LiveSession::spawn(self)
+    /// With `speakers`, committed segments also get speaker labels.
+    pub fn create_live_session(
+        self: Arc<Self>,
+        speakers: Option<Arc<SpeakerEncoder>>,
+    ) -> Result<Arc<LiveSession>, WhisperEngineError> {
+        LiveSession::spawn(self, speakers)
     }
 }
 
@@ -179,6 +186,7 @@ impl WhisperEngine {
                     end_ms: base_ms + s.t1 * 10,
                     text: text.to_string(),
                     words,
+                    speaker: None,
                 })
             })
             .collect();

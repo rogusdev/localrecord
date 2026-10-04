@@ -21,7 +21,7 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   - `Player` + `PlaybackScreen`: MediaPlayer playback; highlights the word
     at the play position from the `.json` timings (whole segments for older
     `.txt`-only recordings); tap a word or timestamp to seek
-  - Sharing: `shareRecording` sends the `.wav` + `.txt` through a
+  - Sharing: `shareRecording` sends the `.wav`, `.txt` and `.json` through a
     FileProvider to the share sheet. No Drive API/OAuth on purpose: that
     needs a Google Cloud project
 - **Transcription engine** (`rust-engine/`): Rust crate over
@@ -33,6 +33,12 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
     rest of the process; recording continues and the UI shows the error
   - Adreno 840: ggml's fp16 Vulkan shaders hit `ErrorDeviceLost`, so the
     engine sets `GGML_VK_DISABLE_F16` before the first model load
+  - `src/speakers.rs`: live speaker labels. Each committed segment's audio
+    gets a CAM++ voiceprint (sherpa-onnx) matched to the session's speakers
+    (cosine to running means, `SAME_SPEAKER_SIMILARITY`); no match starts a
+    new speaker, segments < 1 s inherit the previous label. sherpa-onnx
+    links prebuilt libs: static on the host, `libsherpa-onnx-c-api.so` +
+    `libonnxruntime.so` on Android (`build-rust.sh` copies them to jniLibs)
   - Exposed to Kotlin via **uniffi** (bindings loaded through JNA),
     generated into `app/src/main/java/uniffi/` (gitignored)
   - `vulkan` cargo feature → ggml Vulkan backend for the Adreno GPU
@@ -44,9 +50,10 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   whisper's (often hallucinated) guess at trailing audio and are never
   committed. Forced commit at `MAX_WINDOW_MS` (20 s). Audio is only
   discarded after its text is emitted or a pass found no speech.
-- **Model**: `ggml-base.en-q5_1.bin` (~60 MB), downloaded once from Hugging
-  Face (URL pinned to a revision, SHA-256 verified) into app-private
-  storage. No other network use.
+- **Models**: `ggml-base.en-q5_1.bin` (~60 MB) and the 3D-Speaker CAM++
+  voiceprint model (~30 MB, Apache-2.0), downloaded once from Hugging Face
+  (URLs pinned to a revision, SHA-256 verified) into app-private storage.
+  No other network use.
 
 ## Build commands
 
@@ -94,6 +101,12 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
 - Whether live transcription runs continuously during recording or only
   on-demand post-recording (battery/thermal tradeoff — revisit Pixel 8
   overheating lesson learned)
+
+- Speaker labels are weak on far-field multi-person audio: on an AMI
+  meeting (ES2002a, single array mic) live labels got ~50% of segments right
+  and sherpa's offline diarization did no better. Judge on real recordings
+  before building the planned offline "refine" pass; a known speaker count
+  would help clustering
 
 ## Things NOT to do
 

@@ -11,9 +11,11 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 mod engine;
 mod native;
 mod session;
+mod speakers;
 
 pub use engine::{EngineConfig, Segment, WhisperEngine, WhisperEngineError, Word};
 pub use session::LiveSession;
+pub use speakers::SpeakerEncoder;
 
 /// Route whisper.cpp / engine logs to logcat (or env_logger on host).
 /// Call once from Kotlin before creating an engine.

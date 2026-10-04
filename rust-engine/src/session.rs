@@ -14,6 +14,7 @@ use std::thread::JoinHandle;
 
 use crate::engine::{Segment, WhisperEngine, WhisperEngineError};
 use crate::native::State;
+use crate::speakers::{SpeakerEncoder, SpeakerTracker};
 use crate::{lock, pcm16_bytes_to_f32};
 
 pub const SAMPLE_RATE_HZ: usize = 16_000;
@@ -95,15 +96,19 @@ impl LiveSession {
 }
 
 impl LiveSession {
-    pub(crate) fn spawn(engine: Arc<WhisperEngine>) -> Result<Arc<Self>, WhisperEngineError> {
+    pub(crate) fn spawn(
+        engine: Arc<WhisperEngine>,
+        speakers: Option<Arc<SpeakerEncoder>>,
+    ) -> Result<Arc<Self>, WhisperEngineError> {
         let state = engine.new_state()?;
+        let tracker = speakers.map(SpeakerTracker::new);
         let (tx, rx) = mpsc::channel();
         let segments = Arc::new(Mutex::new(Vec::new()));
         let failure = Arc::new(Mutex::new(None));
         let (out, worker_failure) = (Arc::clone(&segments), Arc::clone(&failure));
         let handle = std::thread::Builder::new()
             .name("whisper-live".to_string())
-            .spawn(move || worker_loop(&engine, state, &rx, &out, &worker_failure))
+            .spawn(move || worker_loop(&engine, state, tracker, &rx, &out, &worker_failure))
             .map_err(|e| WhisperEngineError::Inference {
                 msg: format!("failed to spawn inference worker: {e}"),
             })?;
@@ -119,6 +124,7 @@ impl LiveSession {
 fn worker_loop(
     engine: &WhisperEngine,
     mut state: State,
+    mut speakers: Option<SpeakerTracker>,
     rx: &Receiver<Vec<f32>>,
     out: &Mutex<Vec<Segment>>,
     failure: &Mutex<Option<String>>,
@@ -134,7 +140,7 @@ fn worker_loop(
         if !window.ready() {
             continue;
         }
-        let committed = match engine.run_inference(&mut state, &window.buf, window.start_ms()) {
+        let mut committed = match engine.run_inference(&mut state, &window.buf, window.start_ms()) {
             Ok(segments) => window.commit(segments),
             Err(WhisperEngineError::Backend { msg }) => {
                 log::error!("transcription backend failed; recording continues untranscribed: {msg}");
@@ -149,7 +155,10 @@ fn worker_loop(
                 window.commit(Vec::new())
             }
         };
-        lock(out).extend(committed);
+        if let Some(tracker) = speakers.as_mut() {
+            tracker.label(&mut committed.segments, &committed.audio, committed.audio_start_ms);
+        }
+        lock(out).extend(committed.segments);
     }
 
     // Channel closed (finish or session dropped): flush whatever remains.
@@ -157,18 +166,31 @@ fn worker_loop(
         return;
     }
     let start_ms = window.start_ms();
-    let mut buf = window.buf;
+    let mut buf = window.buf.clone();
     if buf.len() < MIN_AUDIO_SAMPLES {
         buf.resize(MIN_AUDIO_SAMPLES, 0.0);
     }
     match engine.run_inference(&mut state, &buf, start_ms) {
-        Ok(segments) => lock(out).extend(segments),
+        Ok(mut segments) => {
+            if let Some(tracker) = speakers.as_mut() {
+                tracker.label(&mut segments, &window.buf, start_ms);
+            }
+            lock(out).extend(segments);
+        }
         Err(WhisperEngineError::Backend { msg }) => {
             log::error!("transcription backend failed in final flush: {msg}");
             *lock(failure) = Some(msg);
         }
         Err(e) => log::error!("final flush inference failed: {e}"),
     }
+}
+
+/// Segments a pass made final, with the audio trimmed off along with them.
+struct Committed {
+    segments: Vec<Segment>,
+    /// Covers every segment above; starts at recording time `audio_start_ms`.
+    audio: Vec<f32>,
+    audio_start_ms: i64,
 }
 
 /// Uncommitted audio and the rules for what to emit after each pass. Kept
@@ -199,7 +221,7 @@ impl Window {
     /// Take the segments from a pass over `buf`, return the complete ones, and
     /// trim the buffer past them. Audio is only dropped once its text has been
     /// emitted, or when the pass found no speech in it.
-    fn commit(&mut self, mut segments: Vec<Segment>) -> Vec<Segment> {
+    fn commit(&mut self, mut segments: Vec<Segment>) -> Committed {
         self.new_samples = 0;
         let end_ms = to_ms(self.start + self.buf.len());
         let holdback_cutoff_ms = end_ms - HOLDBACK_MS as i64;
@@ -218,15 +240,21 @@ impl Window {
             segments.truncate(complete);
             segments.last().map_or(self.start_ms(), |s| s.end_ms)
         };
-        self.trim_to(trim_to_ms);
-        segments
+        let audio_start_ms = self.start_ms();
+        let audio = self.trim_to(trim_to_ms);
+        Committed {
+            segments,
+            audio,
+            audio_start_ms,
+        }
     }
 
-    fn trim_to(&mut self, ms: i64) {
+    /// Drop audio before recording time `ms`, returning it.
+    fn trim_to(&mut self, ms: i64) -> Vec<f32> {
         let ms = usize::try_from(ms - self.start_ms()).unwrap_or(0);
         let n = (ms * SAMPLES_PER_MS).min(self.buf.len());
-        self.buf.drain(..n);
         self.start += n;
+        self.buf.drain(..n).collect()
     }
 }
 
@@ -244,6 +272,7 @@ mod tests {
             end_ms,
             text: format!("{start_ms}-{end_ms}"),
             words: Vec::new(),
+            speaker: None,
         }
     }
 
@@ -257,7 +286,7 @@ mod tests {
     fn segment_running_to_buffer_end_is_kept_not_dropped() {
         let mut w = window_of(STEP_MS);
         assert!(w.ready());
-        assert!(w.commit(vec![seg(0, STEP_MS as i64)]).is_empty());
+        assert!(w.commit(vec![seg(0, STEP_MS as i64)]).segments.is_empty());
         assert_eq!(w.start_ms(), 0);
         assert_eq!(w.buf.len(), STEP_SAMPLES);
         assert!(!w.ready());
@@ -266,8 +295,11 @@ mod tests {
     #[test]
     fn complete_segments_emitted_and_trimmed() {
         let mut w = window_of(5_000);
-        let out = w.commit(vec![seg(0, 1_500), seg(1_500, 3_200), seg(3_200, 5_000)]);
+        let committed = w.commit(vec![seg(0, 1_500), seg(1_500, 3_200), seg(3_200, 5_000)]);
+        let out = committed.segments;
         assert_eq!(out.len(), 2);
+        assert_eq!(committed.audio_start_ms, 0);
+        assert_eq!(committed.audio.len(), 3_200 * SAMPLES_PER_MS);
         assert_eq!(w.start_ms(), 3_200);
         assert_eq!(w.buf.len(), 1_800 * SAMPLES_PER_MS);
     }
@@ -278,7 +310,7 @@ mod tests {
         w.commit(vec![seg(0, 3_000), seg(3_000, 5_000)]);
         w.push(&vec![0.0; STEP_SAMPLES]);
         assert_eq!(w.start_ms(), 3_000);
-        let out = w.commit(vec![seg(3_000, 6_500), seg(6_500, 9_000)]);
+        let out = w.commit(vec![seg(3_000, 6_500), seg(6_500, 9_000)]).segments;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].end_ms, 6_500);
         assert_eq!(w.start_ms(), 6_500);
@@ -287,7 +319,7 @@ mod tests {
     #[test]
     fn zero_length_segment_is_not_committed() {
         let mut w = window_of(13_000);
-        let out = w.commit(vec![seg(0, 10_000), seg(10_000, 10_000)]);
+        let out = w.commit(vec![seg(0, 10_000), seg(10_000, 10_000)]).segments;
         assert_eq!(out.len(), 1);
         assert_eq!(w.start_ms(), 10_000);
     }
@@ -295,7 +327,7 @@ mod tests {
     #[test]
     fn silence_keeps_only_holdback() {
         let mut w = window_of(5_000);
-        assert!(w.commit(Vec::new()).is_empty());
+        assert!(w.commit(Vec::new()).segments.is_empty());
         assert_eq!(w.start_ms(), 4_000);
         assert_eq!(w.buf.len(), HOLDBACK_MS * SAMPLES_PER_MS);
     }
@@ -303,7 +335,7 @@ mod tests {
     #[test]
     fn max_window_emits_everything() {
         let mut w = window_of(MAX_WINDOW_MS);
-        let out = w.commit(vec![seg(0, 12_000), seg(12_000, MAX_WINDOW_MS as i64)]);
+        let out = w.commit(vec![seg(0, 12_000), seg(12_000, MAX_WINDOW_MS as i64)]).segments;
         assert_eq!(out.len(), 2);
         assert!(w.buf.is_empty());
         assert_eq!(w.start_ms(), MAX_WINDOW_MS as i64);

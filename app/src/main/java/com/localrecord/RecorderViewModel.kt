@@ -58,9 +58,10 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
                 if (!recording) refreshRecordings()
             }
         }
-        // Load the model as soon as it's on disk so the first recording
-        // doesn't wait on it.
+        // Load the models already on disk, and again once a download
+        // completes, so the first recording doesn't wait on them.
         viewModelScope.launch {
+            withContext(Dispatchers.IO) { EngineManager.preload(getApplication()) }
             modelState.first { it is ModelDownloader.State.Ready }
             withContext(Dispatchers.IO) { EngineManager.preload(getApplication()) }
         }

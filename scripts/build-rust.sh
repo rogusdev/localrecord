@@ -42,5 +42,20 @@ done
     -o "$REPO_ROOT/app/src/main/jniLibs" \
     build --release --features vulkan)
 
+# sherpa-onnx (speaker voiceprints) links these prebuilt libs dynamically on
+# Android; its build script drops them next to the target's build output.
+for abi in $ABIS; do
+    case "$abi" in
+        arm64-v8a) triple=aarch64-linux-android ;;
+        armeabi-v7a) triple=armv7-linux-androideabi ;;
+        x86_64) triple=x86_64-linux-android ;;
+        x86) triple=i686-linux-android ;;
+        *) echo "unknown ABI $abi" >&2; exit 1 ;;
+    esac
+    for lib in libsherpa-onnx-c-api.so libonnxruntime.so; do
+        cp "$REPO_ROOT/rust-engine/target/$triple/release/$lib" "$REPO_ROOT/app/src/main/jniLibs/$abi/"
+    done
+done
+
 echo "==> Done. jniLibs:"
 find "$REPO_ROOT/app/src/main/jniLibs" -name "*.so"

@@ -120,11 +120,14 @@ private fun Transcript(segments: List<Segment>, positionMs: Long, onSeek: (Long)
     }
     LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         itemsIndexed(segments) { i, segment ->
-            SegmentRow(
-                segment = segment,
-                highlightedWord = cursor?.takeIf { it.segment == i }?.let { it.word ?: -1 },
-                onSeek = onSeek,
-            )
+            Column {
+                if (speakerChanged(segments, i)) SpeakerLabel(segment.speaker)
+                SegmentRow(
+                    segment = segment,
+                    highlightedWord = cursor?.takeIf { it.segment == i }?.let { it.word ?: -1 },
+                    onSeek = onSeek,
+                )
+            }
         }
     }
 }

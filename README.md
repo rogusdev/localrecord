@@ -50,5 +50,5 @@ present.
 ## Sharing / backup
 
 Each recording has a Share button (list and playback screen) that hands the
-`.wav` and `.txt` to the system share sheet — pick Drive's "Save to Drive" to
-back it up. Word timings stay in the local `.json`.
+`.wav`, `.txt` and `.json` (word timings, speaker labels) to the system share
+sheet — pick Drive's "Save to Drive" to back it up.

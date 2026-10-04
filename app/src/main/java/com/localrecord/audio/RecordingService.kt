@@ -96,7 +96,7 @@ class RecordingService : Service() {
         // just without live transcription. A load failure is shown in the UI.
         var loadError: String? = null
         val session = try {
-            EngineManager.getOrLoad(this)?.createLiveSession()
+            EngineManager.getOrLoad(this)?.createLiveSession(EngineManager.speakersOrLoad(this))
         } catch (e: WhisperEngineException) {
             Log.e(TAG, "live transcription unavailable", e)
             loadError = e.message

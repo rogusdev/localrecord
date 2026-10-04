@@ -18,6 +18,10 @@ required-features = ["cli"]
 # Raw whisper.cpp bindings + the bundled whisper.cpp build; src/native.rs is
 # the safe layer (it catches C++ exceptions, which whisper-rs can't).
 whisper-rs-sys = "0.15"
+# Speaker voiceprints (CAM++ embeddings) for live speaker labels. Prebuilt
+# libs: static on the host, libsherpa-onnx-c-api.so + libonnxruntime.so on
+# Android (scripts/build-rust.sh copies them into jniLibs).
+sherpa-onnx = "1.13"
 uniffi = "0.32"
 thiserror = "2"
 log = "0.4"
