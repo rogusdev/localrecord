@@ -13,7 +13,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.localrecord.ui.PlaybackScreen
 import com.localrecord.ui.RecorderScreen
 
 class MainActivity : ComponentActivity() {
@@ -34,6 +37,7 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) viewModel.confirmDriveEnabled()
+        else viewModel.onDriveConsentDenied()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,11 +47,13 @@ class MainActivity : ComponentActivity() {
                 colorScheme = if (isSystemInDarkTheme()) darkColorScheme()
                 else lightColorScheme()
             ) {
-                RecorderScreen(
-                    viewModel = viewModel,
-                    onRecordClick = ::onRecordClick,
-                    onDriveToggle = ::onDriveToggle,
-                )
+                val playback by viewModel.playback.collectAsStateWithLifecycle()
+                playback?.let { PlaybackScreen(it, onBack = viewModel::closePlayback) }
+                    ?: RecorderScreen(
+                        viewModel = viewModel,
+                        onRecordClick = ::onRecordClick,
+                        onDriveToggle = ::onDriveToggle,
+                    )
             }
         }
     }

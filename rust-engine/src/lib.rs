@@ -12,7 +12,7 @@ mod engine;
 mod native;
 mod session;
 
-pub use engine::{EngineConfig, Segment, WhisperEngine, WhisperEngineError};
+pub use engine::{EngineConfig, Segment, WhisperEngine, WhisperEngineError, Word};
 pub use session::LiveSession;
 
 /// Route whisper.cpp / engine logs to logcat (or env_logger on host).

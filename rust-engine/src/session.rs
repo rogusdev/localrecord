@@ -243,6 +243,7 @@ mod tests {
             start_ms,
             end_ms,
             text: format!("{start_ms}-{end_ms}"),
+            words: Vec::new(),
         }
     }
 

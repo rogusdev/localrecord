@@ -170,6 +170,16 @@ pub(crate) struct RawSegment {
     pub t0: i64,
     pub t1: i64,
     pub text: String,
+    /// Empty unless the params enabled `token_timestamps`.
+    pub words: Vec<RawWord>,
+}
+
+/// A word assembled from whisper tokens; times in centiseconds.
+#[derive(Debug, PartialEq)]
+pub(crate) struct RawWord {
+    pub t0: i64,
+    pub t1: i64,
+    pub text: String,
 }
 
 /// Per-inference working memory (KV caches, compute buffers) for a `Context`.
@@ -210,24 +220,68 @@ impl State {
 
     /// Segments from the last successful `full`.
     pub(crate) fn segments(&self) -> Vec<RawSegment> {
-        let state = self.ptr.as_ptr();
-        // SAFETY (all calls below): live state, indices below n_segments;
-        // these accessors don't throw.
+        let (ctx, state) = (self.ctx.0.as_ptr(), self.ptr.as_ptr());
+        // SAFETY (all calls below): live context/state, indices below the
+        // reported counts; these accessors don't throw.
         let n = unsafe { sys::whisper_full_n_segments_from_state(state) };
+        let eot = unsafe { sys::whisper_token_eot(ctx) };
         (0..n)
             .map(|i| unsafe {
-                let text = sys::whisper_full_get_segment_text_from_state(state, i);
+                let n_tokens = sys::whisper_full_n_tokens_from_state(state, i);
+                // ids from EOT up are special ([_BEG_], timestamps, ...), not text
+                let tokens = (0..n_tokens).filter_map(|j| {
+                    let data = sys::whisper_full_get_token_data_from_state(state, i, j);
+                    let text = sys::whisper_full_get_token_text_from_state(ctx, state, i, j);
+                    (data.id < eot && !text.is_null())
+                        .then(|| (data.t0, data.t1, CStr::from_ptr(text).to_bytes()))
+                });
                 RawSegment {
                     t0: sys::whisper_full_get_segment_t0_from_state(state, i),
                     t1: sys::whisper_full_get_segment_t1_from_state(state, i),
-                    text: if text.is_null() {
-                        String::new()
-                    } else {
-                        CStr::from_ptr(text).to_string_lossy().into_owned()
-                    },
+                    text: c_str_lossy(sys::whisper_full_get_segment_text_from_state(state, i)),
+                    words: group_words(tokens),
                 }
             })
             .collect()
+    }
+}
+
+/// Merge tokens `(t0, t1, text bytes)` into words: a token starting with a
+/// space starts a new word, anything else (word pieces, punctuation) extends
+/// the current one. Bytes are joined before decoding because whisper splits
+/// multi-byte UTF-8 characters across tokens.
+fn group_words<'a>(tokens: impl Iterator<Item = (i64, i64, &'a [u8])>) -> Vec<RawWord> {
+    let mut words = Vec::new();
+    let mut current: Option<(i64, i64, Vec<u8>)> = None;
+    for (t0, t1, text) in tokens {
+        match current.as_mut() {
+            Some((_, end, bytes)) if text.first() != Some(&b' ') => {
+                *end = t1;
+                bytes.extend_from_slice(text);
+            }
+            _ => {
+                words.extend(current.take().and_then(finish_word));
+                current = Some((t0, t1, text.to_vec()));
+            }
+        }
+    }
+    words.extend(current.and_then(finish_word));
+    words
+}
+
+fn finish_word((t0, t1, bytes): (i64, i64, Vec<u8>)) -> Option<RawWord> {
+    let text = String::from_utf8_lossy(&bytes).trim().to_string();
+    (!text.is_empty()).then_some(RawWord { t0, t1, text })
+}
+
+/// # Safety
+/// `ptr` is null or a valid NUL-terminated string.
+unsafe fn c_str_lossy(ptr: *const c_char) -> String {
+    if ptr.is_null() {
+        String::new()
+    } else {
+        // SAFETY: per the contract above.
+        unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
     }
 }
 
@@ -280,6 +334,30 @@ mod tests {
         // SAFETY: valid C string; the throw is what's under test.
         let err = catch_exceptions(|| unsafe { lr_throw_for_test(c"device lost".as_ptr()) });
         assert!(matches!(err, Err(NativeError::Exception(msg)) if msg == "device lost"));
+    }
+
+    #[test]
+    fn tokens_group_into_words() {
+        let tokens: [(i64, i64, &[u8]); 5] = [
+            (0, 40, b" Hello"),
+            (40, 45, b","),
+            (50, 70, b" wor"),
+            (70, 90, b"ld"),
+            (90, 95, b"."),
+        ];
+        let words = group_words(tokens.into_iter());
+        let word = |t0, t1, text: &str| RawWord {
+            t0,
+            t1,
+            text: text.to_string(),
+        };
+        assert_eq!(words, [word(0, 45, "Hello,"), word(50, 95, "world.")]);
+    }
+
+    #[test]
+    fn utf8_split_across_tokens_is_rejoined() {
+        let tokens: [(i64, i64, &[u8]); 2] = [(0, 10, b" caf\xc3"), (10, 20, b"\xa9")];
+        assert_eq!(group_words(tokens.into_iter())[0].text, "café");
     }
 
     #[test]

@@ -53,6 +53,16 @@ pub struct Segment {
     pub start_ms: i64,
     pub end_ms: i64,
     pub text: String,
+    /// Word timings from whisper's token timestamps: approximate (whisper.cpp
+    /// estimates them from token probabilities), within the segment's span.
+    pub words: Vec<Word>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Word {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
 }
 
 /// A loaded Whisper model. Cheap to share; create one per model file and
@@ -140,6 +150,8 @@ impl WhisperEngine {
         // Suppress non-speech tokens (as openai-whisper does by default) so
         // silence doesn't produce "[BLANK_AUDIO]" / "(music)" annotations.
         raw.suppress_nst = true;
+        // Per-token times, grouped into words for playback highlighting.
+        raw.token_timestamps = true;
 
         state.full(&params, samples).map_err(|e| self.record(e))?;
 
@@ -148,11 +160,25 @@ impl WhisperEngine {
             .into_iter()
             .filter_map(|s| {
                 let text = s.text.trim();
+                if text.is_empty() {
+                    return None;
+                }
                 // timestamps are in centiseconds
-                (!text.is_empty()).then(|| Segment {
+                let to_ms = |t: i64| base_ms + t.clamp(s.t0, s.t1) * 10;
+                let words = s
+                    .words
+                    .into_iter()
+                    .map(|w| Word {
+                        start_ms: to_ms(w.t0),
+                        end_ms: to_ms(w.t1),
+                        text: w.text,
+                    })
+                    .collect();
+                Some(Segment {
                     start_ms: base_ms + s.t0 * 10,
                     end_ms: base_ms + s.t1 * 10,
                     text: text.to_string(),
+                    words,
                 })
             })
             .collect();

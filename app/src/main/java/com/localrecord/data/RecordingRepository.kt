@@ -1,7 +1,12 @@
 package com.localrecord.data
 
 import android.content.Context
+import android.util.Log
+import org.json.JSONArray
+import org.json.JSONException
+import org.json.JSONObject
 import uniffi.whisper_engine.Segment
+import uniffi.whisper_engine.Word
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -17,12 +22,16 @@ data class Recording(
 
 /**
  * Recordings live in app-external storage (user-visible via file managers,
- * removed on uninstall): one .wav plus an optional sibling .txt transcript.
+ * removed on uninstall): one .wav plus optional siblings — a readable .txt
+ * transcript and a .json copy with segment/word timings for playback.
  */
 object RecordingRepository {
 
+    private const val TAG = "RecordingRepository"
     private const val WAV_HEADER_BYTES = 44L
     private const val BYTES_PER_MS = 32L // 16 kHz mono s16
+    /** A .txt transcript line: "[mm:ss → mm:ss] text". */
+    private val TXT_LINE = Regex("""^\[(\d+):(\d{2}) → (\d+):(\d{2})] (.*)$""")
 
     fun recordingsDir(context: Context): File {
         val dir = context.getExternalFilesDir("recordings")
@@ -56,16 +65,80 @@ object RecordingRepository {
     fun transcriptFileFor(wavFile: File): File =
         File(wavFile.parentFile, "${wavFile.nameWithoutExtension}.txt")
 
+    private fun timingsFileFor(wavFile: File): File =
+        File(wavFile.parentFile, "${wavFile.nameWithoutExtension}.json")
+
     fun writeTranscript(wavFile: File, segments: List<Segment>) {
         val text = segments.joinToString("\n") { seg ->
             "[${formatMs(seg.startMs)} → ${formatMs(seg.endMs)}] ${seg.text}"
         }
         transcriptFileFor(wavFile).writeText(text)
+        timingsFileFor(wavFile).writeText(toJson(segments).toString())
+    }
+
+    /**
+     * The saved transcript: word timings from the .json, else whole-second
+     * segment times from the .txt (recordings made before word timings).
+     * Null if there is neither. Blocking file IO.
+     */
+    fun readTranscript(wavFile: File): List<Segment>? {
+        val json = timingsFileFor(wavFile)
+        if (json.exists()) {
+            try {
+                return fromJson(JSONObject(json.readText()))
+            } catch (e: JSONException) {
+                Log.w(TAG, "unreadable ${json.name}; falling back to .txt", e)
+            }
+        }
+        val txt = transcriptFileFor(wavFile)
+        if (!txt.exists()) return null
+        return txt.readLines().mapNotNull { line ->
+            TXT_LINE.matchEntire(line)?.destructured?.let { (m0, s0, m1, s1, text) ->
+                Segment(
+                    startMs = (m0.toLong() * 60 + s0.toLong()) * 1000,
+                    endMs = (m1.toLong() * 60 + s1.toLong()) * 1000,
+                    text = text,
+                    words = emptyList(),
+                )
+            }
+        }
     }
 
     fun delete(recording: Recording) {
         recording.wavFile.delete()
         recording.transcriptFile?.delete()
+        timingsFileFor(recording.wavFile).delete()
+    }
+
+    private fun toJson(segments: List<Segment>): JSONObject {
+        fun span(startMs: Long, endMs: Long, text: String) = JSONObject()
+            .put("start_ms", startMs)
+            .put("end_ms", endMs)
+            .put("text", text)
+        val array = JSONArray()
+        for (seg in segments) {
+            val words = JSONArray()
+            seg.words.forEach { words.put(span(it.startMs, it.endMs, it.text)) }
+            array.put(span(seg.startMs, seg.endMs, seg.text).put("words", words))
+        }
+        return JSONObject().put("segments", array)
+    }
+
+    private fun fromJson(json: JSONObject): List<Segment> {
+        val segments = json.getJSONArray("segments")
+        return (0 until segments.length()).map { i ->
+            val seg = segments.getJSONObject(i)
+            val words = seg.getJSONArray("words")
+            Segment(
+                startMs = seg.getLong("start_ms"),
+                endMs = seg.getLong("end_ms"),
+                text = seg.getString("text"),
+                words = (0 until words.length()).map { j ->
+                    val word = words.getJSONObject(j)
+                    Word(word.getLong("start_ms"), word.getLong("end_ms"), word.getString("text"))
+                },
+            )
+        }
     }
 
     private fun formatMs(ms: Long): String {

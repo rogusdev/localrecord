@@ -1,5 +1,6 @@
 package com.localrecord.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,6 +26,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -32,6 +36,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -57,9 +62,19 @@ fun RecorderScreen(
     val recordings by viewModel.recordings.collectAsStateWithLifecycle()
     val driveEnabled by viewModel.driveBackupEnabled.collectAsStateWithLifecycle()
     val wifiOnly by viewModel.wifiOnlyUpload.collectAsStateWithLifecycle()
+    val message by viewModel.message.collectAsStateWithLifecycle()
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(message) {
+        message?.let {
+            snackbarHostState.showSnackbar(it, withDismissAction = true, duration = SnackbarDuration.Long)
+            viewModel.messageShown()
+        }
+    }
 
     Scaffold(
         topBar = { TopAppBar(title = { Text("LocalRecord") }) },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
             FloatingActionButton(onClick = onRecordClick) {
                 Icon(
@@ -103,7 +118,11 @@ fun RecorderScreen(
                 Text("Recordings", style = MaterialTheme.typography.titleMedium)
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     items(recordings, key = { it.wavFile.name }) { rec ->
-                        RecordingRow(rec, onDelete = { viewModel.deleteRecording(rec) })
+                        RecordingRow(
+                            rec,
+                            onOpen = { viewModel.openPlayback(rec) },
+                            onDelete = { viewModel.deleteRecording(rec) },
+                        )
                         HorizontalDivider()
                     }
                 }
@@ -159,10 +178,11 @@ private fun LiveTranscript(segments: List<String>, modifier: Modifier = Modifier
 }
 
 @Composable
-private fun RecordingRow(recording: Recording, onDelete: () -> Unit) {
+private fun RecordingRow(recording: Recording, onOpen: () -> Unit, onDelete: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable(onClick = onOpen)
             .padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -209,7 +229,7 @@ private fun DriveSettingsRow(
     }
 }
 
-private fun formatElapsed(ms: Long): String {
+internal fun formatElapsed(ms: Long): String {
     val totalSeconds = ms / 1000
     return "%02d:%02d".format(totalSeconds / 60, totalSeconds % 60)
 }
