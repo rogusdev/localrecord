@@ -31,6 +31,10 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   - Sharing: `shareRecording` sends the `.wav` and `.vtt` through a
     FileProvider to the share sheet. No Drive API/OAuth on purpose: that
     needs a Google Cloud project
+  - Import (`importRecordings`): the system file picker (Drive etc. as
+    document providers) copies `.wav`s and their `.vtt`s into the
+    recordings dir; never overwrites, a `.vtt` must parse and have its
+    `.wav`
 - **Transcription engine** (`rust-engine/`): Rust crate over
   `whisper-rs-sys` 0.15 (raw bindings; it bundles and builds whisper.cpp,
   nothing vendored here), built for Android via `cargo-ndk`

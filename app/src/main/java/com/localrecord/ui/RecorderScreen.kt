@@ -1,5 +1,7 @@
 package com.localrecord.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -15,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
@@ -67,6 +70,12 @@ fun RecorderScreen(
     val recordings by viewModel.recordings.collectAsStateWithLifecycle()
     val finalizing by viewModel.finalizing.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
+    val importing by viewModel.importing.collectAsStateWithLifecycle()
+    // Any type: providers label .vtt inconsistently; the import checks extensions.
+    val pickFiles = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+        viewModel::importFiles,
+    )
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(message) {
@@ -89,7 +98,16 @@ fun RecorderScreen(
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("LocalRecord") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("LocalRecord") },
+                actions = {
+                    IconButton(onClick = { pickFiles.launch(arrayOf("*/*")) }, enabled = !importing) {
+                        Icon(Icons.Default.FileOpen, contentDescription = "Import recordings")
+                    }
+                },
+            )
+        },
         snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
             FloatingActionButton(onClick = onRecordClick) {
@@ -129,6 +147,10 @@ fun RecorderScreen(
                 LiveTranscript(segments, tentative, modifier = Modifier.weight(1f))
             } else {
                 Text("Recordings", style = MaterialTheme.typography.titleMedium)
+                if (importing) {
+                    Text("Importing…", style = MaterialTheme.typography.bodySmall)
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     items(recordings, key = { it.wavFile.name }) { rec ->
                         RecordingRow(

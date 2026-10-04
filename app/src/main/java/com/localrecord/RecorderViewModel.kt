@@ -1,6 +1,7 @@
 package com.localrecord
 
 import android.app.Application
+import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -8,6 +9,7 @@ import com.localrecord.audio.RecordingService
 import com.localrecord.audio.RecordingState
 import com.localrecord.data.Recording
 import com.localrecord.data.RecordingRepository
+import com.localrecord.data.importRecordings
 import com.localrecord.engine.EngineManager
 import com.localrecord.model.ModelDownloader
 import com.localrecord.playback.Player
@@ -48,6 +50,10 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _playback = MutableStateFlow<Playback?>(null)
     val playback: StateFlow<Playback?> = _playback.asStateFlow()
+
+    /** True while picked files are being copied in. */
+    private val _importing = MutableStateFlow(false)
+    val importing: StateFlow<Boolean> = _importing.asStateFlow()
 
     /** One-shot message for the snackbar; cleared via [messageShown]. */
     private val _message = MutableStateFlow<String?>(null)
@@ -127,6 +133,23 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         closePlayback()
+    }
+
+    /** Copy recordings and transcripts picked from Drive etc. into the app. */
+    fun importFiles(uris: List<Uri>) {
+        if (uris.isEmpty() || _importing.value) return
+        _importing.value = true
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { importRecordings(getApplication(), uris) }
+            _importing.value = false
+            refreshRecordings()
+            _message.value = buildList {
+                if (result.imported.isNotEmpty()) {
+                    add("Imported ${result.imported.size} file${if (result.imported.size == 1) "" else "s"}.")
+                }
+                result.skipped.forEach { (name, reason) -> add("Skipped $name: $reason.") }
+            }.joinToString("\n")
+        }
     }
 
     fun deleteRecording(recording: Recording) {

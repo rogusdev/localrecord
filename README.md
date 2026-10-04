@@ -52,3 +52,8 @@ present.
 Each recording has a Share button (list and playback screen) that hands the
 `.wav` and a WebVTT `.vtt` transcript (speaker labels, per-word start times)
 to the system share sheet — pick Drive's "Save to Drive" to back it up.
+
+To bring recordings back (e.g. onto a new phone), tap the import button in
+the top bar and pick the `.wav` files, with their `.vtt` transcripts, from
+Drive or any other source in the system file picker. Files already in the
+app are never overwritten.
