@@ -10,6 +10,19 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ABIS="${ABIS:-arm64-v8a}"
 # Matches minSdk in app/build.gradle.kts (NDK libvulkan.so stubs start at 24).
 export ANDROID_PLATFORM="31"
+# Google Play requires 16 KB-aligned native libs; NDK r28's clang defaults to
+# it, the host clang used on aarch64 doesn't.
+PAGE_SIZE_RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384"
+
+abi_triple() {
+    case "$1" in
+        arm64-v8a) echo aarch64-linux-android ;;
+        armeabi-v7a) echo armv7-linux-androideabi ;;
+        x86_64) echo x86_64-linux-android ;;
+        x86) echo i686-linux-android ;;
+        *) echo "unknown ABI $1" >&2; exit 1 ;;
+    esac
+}
 
 source "$REPO_ROOT/scripts/env.sh"
 
@@ -34,6 +47,8 @@ fi
 ndk_targets=()
 for abi in $ABIS; do
     ndk_targets+=(-t "$abi")
+    triple="$(abi_triple "$abi")"
+    export "CARGO_TARGET_$(echo "$triple" | tr a-z- A-Z_)_RUSTFLAGS=$PAGE_SIZE_RUSTFLAGS"
 done
 # whisper-rs-sys links libc++_shared.so, so it has to ship in jniLibs too.
 (cd "$REPO_ROOT/rust-engine" && \
@@ -45,13 +60,7 @@ done
 # sherpa-onnx (speaker voiceprints) links these prebuilt libs dynamically on
 # Android; its build script drops them next to the target's build output.
 for abi in $ABIS; do
-    case "$abi" in
-        arm64-v8a) triple=aarch64-linux-android ;;
-        armeabi-v7a) triple=armv7-linux-androideabi ;;
-        x86_64) triple=x86_64-linux-android ;;
-        x86) triple=i686-linux-android ;;
-        *) echo "unknown ABI $abi" >&2; exit 1 ;;
-    esac
+    triple="$(abi_triple "$abi")"
     for lib in libsherpa-onnx-c-api.so libonnxruntime.so; do
         cp "$REPO_ROOT/rust-engine/target/$triple/release/$lib" "$REPO_ROOT/app/src/main/jniLibs/$abi/"
     done

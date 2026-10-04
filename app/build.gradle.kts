@@ -23,9 +23,25 @@ android {
         }
     }
 
+    // Play upload key, from ~/.gradle/gradle.properties (never the repo).
+    // Without these the release build comes out unsigned.
+    val uploadStoreFile = providers.gradleProperty("localrecord.upload.storeFile").orNull
+    signingConfigs {
+        if (uploadStoreFile != null) {
+            create("upload") {
+                storeFile = file(uploadStoreFile)
+                storePassword = providers.gradleProperty("localrecord.upload.storePassword").get()
+                keyAlias = providers.gradleProperty("localrecord.upload.keyAlias").get()
+                keyPassword = providers.gradleProperty("localrecord.upload.keyPassword").get()
+            }
+        }
+    }
+
     buildTypes {
         release {
+            // R8 would strip the classes JNA/uniffi reach by reflection.
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("upload")
         }
     }
 

@@ -40,6 +40,29 @@ latency numbers.
 GPU/Vulkan behavior must be validated on a physical device; emulator Vulkan
 compute is unreliable.
 
+## Release (Google Play)
+
+`./gradlew bundleRelease` builds `app/build/outputs/bundle/release/app-release.aab`,
+signed with the Play upload key when `~/.gradle/gradle.properties` has:
+
+```properties
+localrecord.upload.storeFile=/home/you/keys/localrecord-upload.jks
+localrecord.upload.storePassword=...
+localrecord.upload.keyAlias=upload
+localrecord.upload.keyPassword=...
+```
+
+Create the key once (keep it backed up outside the repo; Play App Signing
+holds the actual app signing key, so a lost upload key can be reset):
+
+```bash
+keytool -genkeypair -v -keystore ~/keys/localrecord-upload.jks \
+    -keyalg RSA -keysize 4096 -validity 10000 -alias upload
+```
+
+Bump `versionCode` in `app/build.gradle.kts` for every upload. Native libs
+must be 16 KB page-aligned (Play requirement); `build-rust.sh` links them so.
+
 ## Model
 
 First run: the app offers a one-time download of `ggml-base.en-q5_1.bin`
