@@ -20,6 +20,10 @@ object RecordingState {
     private val _liveSegments = MutableStateFlow<List<Segment>>(emptyList())
     val liveSegments: StateFlow<List<Segment>> = _liveSegments.asStateFlow()
 
+    /** Not-yet-final text after [liveSegments]; replaced on every pass. */
+    private val _tentativeSegments = MutableStateFlow<List<Segment>>(emptyList())
+    val tentativeSegments: StateFlow<List<Segment>> = _tentativeSegments.asStateFlow()
+
     /** True while live transcription is running for the current recording. */
     private val _transcriptionActive = MutableStateFlow(false)
     val transcriptionActive: StateFlow<Boolean> = _transcriptionActive.asStateFlow()
@@ -30,6 +34,7 @@ object RecordingState {
 
     internal fun onRecordingStarted(transcribing: Boolean, error: String?) {
         _liveSegments.value = emptyList()
+        _tentativeSegments.value = emptyList()
         _elapsedMs.value = 0L
         _transcriptionActive.value = transcribing
         _transcriptionError.value = error
@@ -46,12 +51,17 @@ object RecordingState {
         _transcriptionError.value = error
     }
 
+    internal fun setTentative(segments: List<Segment>) {
+        _tentativeSegments.value = segments
+    }
+
     internal fun appendSegments(segments: List<Segment>) {
         if (segments.isEmpty()) return
         _liveSegments.update { it + segments }
     }
 
     internal fun onRecordingStopped() {
+        _tentativeSegments.value = emptyList()
         _isRecording.value = false
         _transcriptionActive.value = false
     }

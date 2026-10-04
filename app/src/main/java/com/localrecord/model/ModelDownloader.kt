@@ -34,17 +34,21 @@ object ModelDownloader {
         bytes = 59_721_011,
     )
 
-    // 3D-Speaker CAM++ voiceprints (Apache-2.0, trained on VoxCeleb), from
-    // sherpa-onnx's model mirror.
+    // 3D-Speaker CAM++ "zh_en common advanced" voiceprints (3D-Speaker,
+    // Apache-2.0), from sherpa-onnx's model mirror. Beat 10 other sherpa
+    // speaker models on far-field meeting audio (AMI) at the same size/speed.
     private val SPEAKER = ModelFile(
-        name = "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+        name = "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
         url = "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/" +
-            "0743f301363dec56491a490f6d6cbc9d67f9a3bf/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
-        sha256 = "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b",
-        bytes = 29_596_978,
+            "0743f301363dec56491a490f6d6cbc9d67f9a3bf/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+        sha256 = "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2",
+        bytes = 28_281_164,
     )
 
     private val ALL = listOf(WHISPER, SPEAKER)
+
+    /** Model files earlier builds downloaded; deleted to reclaim space. */
+    private val OBSOLETE = listOf("3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx")
 
     private const val BYTES_PER_MB = 1_000_000L
 
@@ -72,6 +76,7 @@ object ModelDownloader {
         ALL.filterNot { fileFor(context, it).exists() }
 
     fun refreshState(context: Context) {
+        OBSOLETE.forEach { File(File(context.filesDir, "models"), it).delete() }
         val missing = missing(context)
         _state.value = if (missing.isEmpty()) State.Ready
         else State.NotDownloaded(missing.sumOf { it.bytes } / BYTES_PER_MB)

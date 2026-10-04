@@ -34,7 +34,8 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   - Adreno 840: ggml's fp16 Vulkan shaders hit `ErrorDeviceLost`, so the
     engine sets `GGML_VK_DISABLE_F16` before the first model load
   - `src/speakers.rs`: live speaker labels. Each committed segment's audio
-    gets a CAM++ voiceprint (sherpa-onnx) matched to the session's speakers
+    gets a voiceprint (sherpa-onnx, 3D-Speaker CAM++ "zh_en common advanced")
+    matched to the session's speakers
     (cosine to running means, `SAME_SPEAKER_SIMILARITY`); no match starts a
     new speaker, segments < 1 s inherit the previous label. sherpa-onnx
     links prebuilt libs: static on the host, `libsherpa-onnx-c-api.so` +
@@ -51,7 +52,7 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   committed. Forced commit at `MAX_WINDOW_MS` (20 s). Audio is only
   discarded after its text is emitted or a pass found no speech.
 - **Models**: `ggml-base.en-q5_1.bin` (~60 MB) and the 3D-Speaker CAM++
-  voiceprint model (~30 MB, Apache-2.0), downloaded once from Hugging Face
+  "advanced" voiceprint model (~28 MB, Apache-2.0), downloaded once from Hugging Face
   (URLs pinned to a revision, SHA-256 verified) into app-private storage.
   No other network use.
 
@@ -102,11 +103,12 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   on-demand post-recording (battery/thermal tradeoff — revisit Pixel 8
   overheating lesson learned)
 
-- Speaker labels are weak on far-field multi-person audio: on an AMI
-  meeting (ES2002a, single array mic) live labels got ~50% of segments right
-  and sherpa's offline diarization did no better. Judge on real recordings
-  before building the planned offline "refine" pass; a known speaker count
-  would help clustering
+- Speaker model choice: of 11 sherpa-onnx speaker models, CAM++ "zh_en
+  common advanced" was best on far-field AMI meetings (live labels 93% of
+  segments right, 96% on held-out EN2002a; the VoxCeleb CAM++ got ~50%) at
+  ~44 ms per 4 s of audio. Runner-ups: ERes2Net base (similar accuracy,
+  2.5x slower), TitaNet small (87%, fastest). An offline "refine" pass with
+  sherpa's diarization is not built; it did poorly with the old model
 
 ## Things NOT to do
 

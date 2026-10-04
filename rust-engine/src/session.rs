@@ -8,6 +8,7 @@
 //! is re-transcribed with more context on the next pass. Sizes are a first
 //! guess — tune once real device latency numbers exist (see CLAUDE.md).
 
+use std::ffi::CString;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
@@ -30,20 +31,25 @@ const HOLDBACK_MS: usize = 1_000;
 const MAX_WINDOW_MS: usize = 20_000;
 /// whisper.cpp rejects buffers shorter than ~1 s; pad the final flush.
 const MIN_AUDIO_MS: usize = 1_100;
+/// Trailing committed text given to each pass as decoder context (whisper
+/// keeps at most ~224 prompt tokens; 200 characters is ~45).
+const PROMPT_CHARS: usize = 200;
 
 const STEP_SAMPLES: usize = STEP_MS * SAMPLES_PER_MS;
 const MAX_WINDOW_SAMPLES: usize = MAX_WINDOW_MS * SAMPLES_PER_MS;
-const MIN_AUDIO_SAMPLES: usize = MIN_AUDIO_MS * SAMPLES_PER_MS;
+pub(crate) const MIN_AUDIO_SAMPLES: usize = MIN_AUDIO_MS * SAMPLES_PER_MS;
 
 /// One live recording's transcription session. Created via
 /// `WhisperEngine::create_live_session`. Thread-safe; intended flow:
-/// audio thread calls `feed_pcm16`, UI polls `drain_segments`,
-/// `finish` flushes the remainder and joins the worker.
+/// audio thread calls `feed_pcm16`, UI polls `drain_segments` and
+/// `tentative`, `finish` flushes the remainder and joins the worker.
 #[derive(uniffi::Object)]
 pub struct LiveSession {
     tx: Mutex<Option<Sender<Vec<f32>>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
     segments: Arc<Mutex<Vec<Segment>>>,
+    /// The latest pass's held-back segments, replaced every pass.
+    tentative: Arc<Mutex<Vec<Segment>>>,
     /// Set when the backend fails mid-session; transcription stops for good.
     failure: Arc<Mutex<Option<String>>>,
 }
@@ -70,6 +76,12 @@ impl LiveSession {
     /// Take all newly stable segments since the last call.
     pub fn drain_segments(&self) -> Vec<Segment> {
         std::mem::take(&mut *lock(&self.segments))
+    }
+
+    /// Text after the last committed segment as the latest pass heard it:
+    /// shown as a preview, it may still change before it is committed.
+    pub fn tentative(&self) -> Vec<Segment> {
+        lock(&self.tentative).clone()
     }
 
     /// Why transcription stopped mid-session, if it did. Audio fed afterwards
@@ -104,11 +116,16 @@ impl LiveSession {
         let tracker = speakers.map(SpeakerTracker::new);
         let (tx, rx) = mpsc::channel();
         let segments = Arc::new(Mutex::new(Vec::new()));
+        let tentative = Arc::new(Mutex::new(Vec::new()));
         let failure = Arc::new(Mutex::new(None));
-        let (out, worker_failure) = (Arc::clone(&segments), Arc::clone(&failure));
+        let shared = Shared {
+            out: Arc::clone(&segments),
+            tentative: Arc::clone(&tentative),
+            failure: Arc::clone(&failure),
+        };
         let handle = std::thread::Builder::new()
             .name("whisper-live".to_string())
-            .spawn(move || worker_loop(&engine, state, tracker, &rx, &out, &worker_failure))
+            .spawn(move || worker_loop(&engine, state, tracker, &rx, &shared))
             .map_err(|e| WhisperEngineError::Inference {
                 msg: format!("failed to spawn inference worker: {e}"),
             })?;
@@ -116,9 +133,17 @@ impl LiveSession {
             tx: Mutex::new(Some(tx)),
             worker: Mutex::new(Some(handle)),
             segments,
+            tentative,
             failure,
         }))
     }
+}
+
+/// What the worker publishes to the `LiveSession`.
+struct Shared {
+    out: Arc<Mutex<Vec<Segment>>>,
+    tentative: Arc<Mutex<Vec<Segment>>>,
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 fn worker_loop(
@@ -126,10 +151,10 @@ fn worker_loop(
     mut state: State,
     mut speakers: Option<SpeakerTracker>,
     rx: &Receiver<Vec<f32>>,
-    out: &Mutex<Vec<Segment>>,
-    failure: &Mutex<Option<String>>,
+    shared: &Shared,
 ) {
     let mut window = Window::default();
+    let mut context = Context::default();
     while let Ok(samples) = rx.recv() {
         window.push(&samples);
         // Fold any backlog into one pass so a slow device catches up instead
@@ -140,11 +165,14 @@ fn worker_loop(
         if !window.ready() {
             continue;
         }
-        let mut committed = match engine.run_inference(&mut state, &window.buf, window.start_ms()) {
+        let prompt = context.prompt();
+        let pass = engine.run_inference(&mut state, &window.buf, window.start_ms(), prompt.as_deref());
+        let mut committed = match pass {
             Ok(segments) => window.commit(segments),
             Err(WhisperEngineError::Backend { msg }) => {
                 log::error!("transcription backend failed; recording continues untranscribed: {msg}");
-                *lock(failure) = Some(msg);
+                *lock(&shared.failure) = Some(msg);
+                lock(&shared.tentative).clear();
                 // Drain until finish so feed_pcm16 doesn't see a dead worker.
                 for _ in rx.iter() {}
                 return;
@@ -158,36 +186,83 @@ fn worker_loop(
         if let Some(tracker) = speakers.as_mut() {
             tracker.label(&mut committed.segments, &committed.audio, committed.audio_start_ms);
         }
-        lock(out).extend(committed.segments);
+        context.extend(&committed.segments);
+        lock(&shared.out).extend(committed.segments);
+        *lock(&shared.tentative) = committed.pending;
     }
 
     // Channel closed (finish or session dropped): flush whatever remains.
-    if window.buf.is_empty() {
-        return;
+    if !window.buf.is_empty() {
+        flush(engine, &mut state, speakers.as_mut(), &window, &context, shared);
     }
+    lock(&shared.tentative).clear();
+}
+
+fn flush(
+    engine: &WhisperEngine,
+    state: &mut State,
+    speakers: Option<&mut SpeakerTracker>,
+    window: &Window,
+    context: &Context,
+    shared: &Shared,
+) {
     let start_ms = window.start_ms();
     let mut buf = window.buf.clone();
     if buf.len() < MIN_AUDIO_SAMPLES {
         buf.resize(MIN_AUDIO_SAMPLES, 0.0);
     }
-    match engine.run_inference(&mut state, &buf, start_ms) {
+    let prompt = context.prompt();
+    match engine.run_inference(state, &buf, start_ms, prompt.as_deref()) {
         Ok(mut segments) => {
-            if let Some(tracker) = speakers.as_mut() {
+            if let Some(tracker) = speakers {
                 tracker.label(&mut segments, &window.buf, start_ms);
             }
-            lock(out).extend(segments);
+            lock(&shared.out).extend(segments);
         }
         Err(WhisperEngineError::Backend { msg }) => {
             log::error!("transcription backend failed in final flush: {msg}");
-            *lock(failure) = Some(msg);
+            *lock(&shared.failure) = Some(msg);
         }
         Err(e) => log::error!("final flush inference failed: {e}"),
+    }
+}
+
+/// The tail of the committed transcript, given to each pass as its prompt.
+#[derive(Default)]
+struct Context {
+    text: String,
+}
+
+impl Context {
+    fn extend(&mut self, segments: &[Segment]) {
+        for segment in segments {
+            if !self.text.is_empty() {
+                self.text.push(' ');
+            }
+            self.text.push_str(&segment.text);
+        }
+        // Keep the last PROMPT_CHARS characters, from a word start.
+        let chars = self.text.chars().count();
+        if chars > PROMPT_CHARS {
+            let cut = self.text.char_indices().nth(chars - PROMPT_CHARS).map_or(0, |(i, _)| i);
+            let start = self.text[cut..].find(' ').map_or(cut, |i| cut + i + 1);
+            self.text.drain(..start);
+        }
+    }
+
+    fn prompt(&self) -> Option<CString> {
+        if self.text.is_empty() {
+            return None;
+        }
+        CString::new(self.text.as_str()).ok()
     }
 }
 
 /// Segments a pass made final, with the audio trimmed off along with them.
 struct Committed {
     segments: Vec<Segment>,
+    /// The pass's held-back segments (not final; re-transcribed next pass).
+    pending: Vec<Segment>,
     /// Covers every segment above; starts at recording time `audio_start_ms`.
     audio: Vec<f32>,
     audio_start_ms: i64,
@@ -225,6 +300,7 @@ impl Window {
         self.new_samples = 0;
         let end_ms = to_ms(self.start + self.buf.len());
         let holdback_cutoff_ms = end_ms - HOLDBACK_MS as i64;
+        let mut pending = Vec::new();
         let trim_to_ms = if self.buf.len() >= MAX_WINDOW_SAMPLES {
             end_ms
         } else if segments.is_empty() {
@@ -237,13 +313,15 @@ impl Window {
                 .iter()
                 .take_while(|s| s.end_ms > s.start_ms && s.end_ms <= holdback_cutoff_ms)
                 .count();
-            segments.truncate(complete);
+            pending = segments.split_off(complete);
+            pending.retain(|s| s.end_ms > s.start_ms);
             segments.last().map_or(self.start_ms(), |s| s.end_ms)
         };
         let audio_start_ms = self.start_ms();
         let audio = self.trim_to(trim_to_ms);
         Committed {
             segments,
+            pending,
             audio,
             audio_start_ms,
         }
@@ -322,6 +400,26 @@ mod tests {
         let out = w.commit(vec![seg(0, 10_000), seg(10_000, 10_000)]).segments;
         assert_eq!(out.len(), 1);
         assert_eq!(w.start_ms(), 10_000);
+    }
+
+    #[test]
+    fn held_back_segments_are_pending_except_zero_length() {
+        let mut w = window_of(9_000);
+        let c = w.commit(vec![seg(0, 4_000), seg(4_000, 8_500), seg(8_500, 8_500)]);
+        assert_eq!(c.segments.len(), 1);
+        assert_eq!(c.pending.len(), 1);
+        assert_eq!(c.pending[0].end_ms, 8_500);
+    }
+
+    #[test]
+    fn context_keeps_the_tail_from_a_word_start() {
+        let mut context = Context::default();
+        let mut s = seg(0, 1);
+        s.text = "word ".repeat(100).trim_end().to_string();
+        context.extend(&[s]);
+        assert!(context.text.len() <= PROMPT_CHARS);
+        assert!(context.text.starts_with("word"));
+        assert!(context.prompt().is_some());
     }
 
     #[test]

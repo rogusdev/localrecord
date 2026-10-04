@@ -37,6 +37,7 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     val isRecording = RecordingState.isRecording
     val elapsedMs = RecordingState.elapsedMs
     val liveSegments = RecordingState.liveSegments
+    val tentativeSegments = RecordingState.tentativeSegments
     val transcriptionActive = RecordingState.transcriptionActive
     val transcriptionError = RecordingState.transcriptionError
     val modelState = ModelDownloader.state

@@ -57,6 +57,7 @@ fun RecorderScreen(
     val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
     val elapsedMs by viewModel.elapsedMs.collectAsStateWithLifecycle()
     val segments by viewModel.liveSegments.collectAsStateWithLifecycle()
+    val tentative by viewModel.tentativeSegments.collectAsStateWithLifecycle()
     val transcribing by viewModel.transcriptionActive.collectAsStateWithLifecycle()
     val transcriptionError by viewModel.transcriptionError.collectAsStateWithLifecycle()
     val modelState by viewModel.modelState.collectAsStateWithLifecycle()
@@ -109,7 +110,7 @@ fun RecorderScreen(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
-                LiveTranscript(segments = segments, modifier = Modifier.weight(1f))
+                LiveTranscript(segments, tentative, modifier = Modifier.weight(1f))
             } else {
                 Text("Recordings", style = MaterialTheme.typography.titleMedium)
                 LazyColumn(modifier = Modifier.weight(1f)) {
@@ -153,17 +154,33 @@ private fun ModelCard(state: ModelDownloader.State, onDownload: () -> Unit) {
     }
 }
 
+/** Final segments, then the latest pass's not-yet-final text in grey. */
 @Composable
-private fun LiveTranscript(segments: List<Segment>, modifier: Modifier = Modifier) {
+private fun LiveTranscript(
+    segments: List<Segment>,
+    tentative: List<Segment>,
+    modifier: Modifier = Modifier,
+) {
     val listState = rememberLazyListState()
-    LaunchedEffect(segments.size) {
-        if (segments.isNotEmpty()) listState.animateScrollToItem(segments.size - 1)
+    val pending = tentative.joinToString(" ") { it.text }
+    LaunchedEffect(segments.size, pending) {
+        val last = segments.size - if (pending.isEmpty()) 1 else 0
+        if (last >= 0) listState.animateScrollToItem(last)
     }
     LazyColumn(state = listState, modifier = modifier) {
         items(segments.size) { i ->
             if (speakerChanged(segments, i)) SpeakerLabel(segments[i].speaker)
             Text(segments[i].text, style = MaterialTheme.typography.bodyLarge)
             Spacer(Modifier.height(4.dp))
+        }
+        if (pending.isNotEmpty()) {
+            item {
+                Text(
+                    pending,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                )
+            }
         }
     }
 }

@@ -1,8 +1,9 @@
-use std::ffi::{c_int, CString};
+use std::ffi::{c_int, CStr, CString};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::native::{Context, FullParams, NativeError, State};
-use crate::session::LiveSession;
+use crate::session::{LiveSession, MIN_AUDIO_SAMPLES};
 use crate::speakers::SpeakerEncoder;
 use crate::{lock, pcm16_bytes_to_f32};
 
@@ -100,12 +101,16 @@ impl WhisperEngine {
             "model loaded from {model_path} (use_gpu={}, flash_attn={FLASH_ATTN})",
             config.use_gpu
         );
-        Ok(Arc::new(Self {
+        let engine = Arc::new(Self {
             ctx: Arc::new(ctx),
             config,
             language,
             failure: Mutex::new(None),
-        }))
+        });
+        if engine.config.use_gpu {
+            engine.warm_up();
+        }
+        Ok(engine)
     }
 
     /// Transcribe a complete clip of 16 kHz mono s16le PCM. Blocking; call
@@ -116,7 +121,7 @@ impl WhisperEngine {
             return Err(WhisperEngineError::EmptyAudio);
         }
         let mut state = self.new_state()?;
-        self.run_inference(&mut state, &samples, 0)
+        self.run_inference(&mut state, &samples, 0, None)
     }
 
     /// Start a live sliding-window transcription session. Feed audio as it
@@ -131,27 +136,49 @@ impl WhisperEngine {
 }
 
 impl WhisperEngine {
+    /// The first GPU pass compiles ggml's Vulkan pipelines (~2 s on the
+    /// Adreno 840). Run one on silence at load so the first live pass isn't
+    /// late. A backend failure here is recorded like any other.
+    fn warm_up(&self) {
+        let started = Instant::now();
+        let silence = vec![0.0; MIN_AUDIO_SAMPLES];
+        match self
+            .new_state()
+            .and_then(|mut state| self.run_inference(&mut state, &silence, 0, None))
+        {
+            Ok(_) => log::info!("GPU warm-up took {:?}", started.elapsed()),
+            Err(e) => log::error!("GPU warm-up failed: {e}"),
+        }
+    }
+
     pub(crate) fn new_state(&self) -> Result<State, WhisperEngineError> {
         self.check_usable()?;
         State::new(Arc::clone(&self.ctx)).map_err(|e| self.record(e))
     }
 
     /// Run whisper full inference over `samples`, returning segments offset
-    /// by `base_ms` (the recording-relative time of `samples[0]`).
+    /// by `base_ms` (the recording-relative time of `samples[0]`). `prompt`
+    /// is text that came just before the audio.
     pub(crate) fn run_inference(
         &self,
         state: &mut State,
         samples: &[f32],
         base_ms: i64,
+        prompt: Option<&CStr>,
     ) -> Result<Vec<Segment>, WhisperEngineError> {
         self.check_usable()?;
         let mut params = FullParams::greedy(&self.language);
+        if let Some(prompt) = prompt {
+            params.set_prompt(prompt);
+        }
         let raw = params.raw_mut();
         raw.n_threads = c_int::from(self.config.num_threads);
         raw.print_special = false;
         raw.print_progress = false;
         raw.print_realtime = false;
         raw.print_timestamps = false;
+        // Live passes re-read overlapping audio, so whisper's own carried-over
+        // text would repeat it; context comes only from `prompt`.
         raw.no_context = true;
         raw.suppress_blank = true;
         // Suppress non-speech tokens (as openai-whisper does by default) so

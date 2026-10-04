@@ -1,5 +1,6 @@
 //! Live speaker labels. Each committed segment's audio becomes a voiceprint
-//! (speaker embedding: sherpa-onnx running a CAM++ model) that is matched
+//! (speaker embedding: sherpa-onnx running 3D-Speaker's CAM++ "zh_en common
+//! advanced" model) that is matched
 //! against the speakers heard so far in the session; no match starts a new
 //! speaker. One label per segment, so a segment spanning a turn change gets
 //! whichever voice dominates it.
@@ -15,10 +16,10 @@ use crate::session::SAMPLE_RATE_HZ;
 /// segment's speaker instead.
 const MIN_VOICEPRINT_MS: i64 = 1_000;
 /// Cosine similarity to a speaker's mean voiceprint at or above which a
-/// segment is that speaker. CAM++ (VoxCeleb): on a far-field 4-person meeting
-/// (AMI ES2002a) 0.3-0.4 over-split least yet labelled only ~50% of segments
-/// right; distinct close-mic voices still merged at 0.5. A compromise.
-const SAME_SPEAKER_SIMILARITY: f32 = 0.4;
+/// segment is that speaker. Best single value for this model over four
+/// far-field AMI meetings, one headset mix and a clean dialog (93% of
+/// segments right); 96% on held-out meeting EN2002a.
+const SAME_SPEAKER_SIMILARITY: f32 = 0.35;
 /// CPU threads for one voiceprint; runs on the live worker between passes.
 const VOICEPRINT_THREADS: i32 = 2;
 

@@ -158,8 +158,14 @@ impl<'a> FullParams<'a> {
         }
     }
 
-    /// Plain fields to tune. Leave the pointer fields (`language`, callbacks)
-    /// alone: their lifetimes aren't tracked.
+    /// Text the decoder treats as coming just before the audio (the
+    /// transcript so far), for consistent spelling and style across passes.
+    pub(crate) fn set_prompt(&mut self, prompt: &'a CStr) {
+        self.raw.initial_prompt = prompt.as_ptr();
+    }
+
+    /// Plain fields to tune. Leave the pointer fields (`language`,
+    /// `initial_prompt`, callbacks) alone: their lifetimes aren't tracked.
     pub(crate) fn raw_mut(&mut self) -> &mut sys::whisper_full_params {
         &mut self.raw
     }
