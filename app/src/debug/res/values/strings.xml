@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds install as a separate app (applicationIdSuffix) next to the Play one. -->
+<resources>
+    <string name="app_name">LocalRecord Debug</string>
+</resources>

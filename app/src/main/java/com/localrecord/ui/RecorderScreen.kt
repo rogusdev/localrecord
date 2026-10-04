@@ -47,8 +47,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.localrecord.R
 import com.localrecord.RecorderViewModel
 import com.localrecord.data.Recording
 import com.localrecord.model.ModelDownloader
@@ -101,7 +103,7 @@ fun RecorderScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("LocalRecord") },
+                title = { Text(stringResource(R.string.app_name)) },
                 actions = {
                     IconButton(onClick = { pickFiles.launch(arrayOf("*/*")) }, enabled = !importing) {
                         Icon(Icons.Default.FileOpen, contentDescription = "Import recordings")

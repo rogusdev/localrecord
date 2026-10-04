@@ -38,6 +38,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Separate app from the Play release, so deploy never collides
+            // with its signature; named "LocalRecord Debug" (src/debug/res).
+            applicationIdSuffix = ".debug"
+        }
         release {
             // R8 would strip the classes JNA/uniffi reach by reflection.
             isMinifyEnabled = false
