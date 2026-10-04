@@ -15,7 +15,9 @@ path = "src/bin/uniffi-bindgen.rs"
 required-features = ["cli"]
 
 [dependencies]
-whisper-rs = { version = "0.16", features = ["log_backend"] }
+# Raw whisper.cpp bindings + the bundled whisper.cpp build; src/native.rs is
+# the safe layer (it catches C++ exceptions, which whisper-rs can't).
+whisper-rs-sys = "0.15"
 uniffi = "0.32"
 thiserror = "2"
 log = "0.4"
@@ -26,13 +28,17 @@ android_logger = "0.15"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 env_logger = "0.11"
 
+[build-dependencies]
+# Compiles src/catch.cpp, the C++ exception barrier.
+cc = "1"
+
 [features]
 default = []
 # Builds the uniffi-bindgen binary (scripts/build-rust.sh enables it).
 cli = ["uniffi/cli"]
 # GPU-accelerated inference via ggml's Vulkan backend (Adreno on-device).
 # Requires glslc on PATH at build time (NDK ships it — see scripts/env.sh).
-vulkan = ["whisper-rs/vulkan"]
+vulkan = ["whisper-rs-sys/vulkan"]
 
 [profile.release]
 lto = true

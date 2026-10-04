@@ -6,7 +6,10 @@
 
 uniffi::setup_scaffolding!();
 
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 mod engine;
+mod native;
 mod session;
 
 pub use engine::{EngineConfig, Segment, WhisperEngine, WhisperEngineError};
@@ -28,7 +31,13 @@ pub fn init_logging() {
             .filter_level(log::LevelFilter::Info)
             .try_init();
     }
-    whisper_rs::install_logging_hooks();
+    native::install_logging();
+}
+
+/// Lock, ignoring poisoning: every guarded value here stays consistent if a
+/// holder panics, and a panic in an exported method would cross the FFI.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Convert s16le PCM bytes to the f32 samples whisper.cpp expects.

@@ -25,7 +25,7 @@ object RecordingState {
     private val _transcriptionActive = MutableStateFlow(false)
     val transcriptionActive: StateFlow<Boolean> = _transcriptionActive.asStateFlow()
 
-    /** Why transcription is off when the model is present but failed to load. */
+    /** Why transcription is off although the model is present (load or backend failure). */
     private val _transcriptionError = MutableStateFlow<String?>(null)
     val transcriptionError: StateFlow<String?> = _transcriptionError.asStateFlow()
 
@@ -45,6 +45,12 @@ object RecordingState {
 
     internal fun onElapsed(ms: Long) {
         _elapsedMs.value = ms
+    }
+
+    /** Transcription stopped mid-recording; recording carries on. Idempotent. */
+    internal fun onTranscriptionFailed(error: String) {
+        _transcriptionActive.value = false
+        _transcriptionError.value = error
     }
 
     internal fun appendSegments(segments: List<Segment>) {

@@ -169,6 +169,7 @@ class RecordingService : Service() {
                     RecordingState.onElapsed(SystemClock.elapsedRealtime() - startedAt)
                     if (session != null && ++reads % DRAIN_EVERY_READS == 0) {
                         publish(session.drainSegments())
+                        session.failure()?.let(RecordingState::onTranscriptionFailed)
                     }
                 }
             }

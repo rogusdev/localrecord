@@ -9,13 +9,12 @@
 //! guess — tune once real device latency numbers exist (see CLAUDE.md).
 
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 
-use whisper_rs::WhisperState;
-
-use crate::engine::{run_inference, Segment, WhisperEngine, WhisperEngineError};
-use crate::pcm16_bytes_to_f32;
+use crate::engine::{Segment, WhisperEngine, WhisperEngineError};
+use crate::native::State;
+use crate::{lock, pcm16_bytes_to_f32};
 
 pub const SAMPLE_RATE_HZ: usize = 16_000;
 const SAMPLES_PER_MS: usize = SAMPLE_RATE_HZ / 1000;
@@ -44,6 +43,8 @@ pub struct LiveSession {
     tx: Mutex<Option<Sender<Vec<f32>>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
     segments: Arc<Mutex<Vec<Segment>>>,
+    /// Set when the backend fails mid-session; transcription stops for good.
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 #[uniffi::export]
@@ -70,6 +71,12 @@ impl LiveSession {
         std::mem::take(&mut *lock(&self.segments))
     }
 
+    /// Why transcription stopped mid-session, if it did. Audio fed afterwards
+    /// is accepted and dropped, so recording can carry on.
+    pub fn failure(&self) -> Option<String> {
+        lock(&self.failure).clone()
+    }
+
     /// Flush remaining audio, stop the worker, and return any segments not
     /// yet drained (including the flushed tail). Blocking.
     pub fn finish(&self) -> Result<Vec<Segment>, WhisperEngineError> {
@@ -89,16 +96,14 @@ impl LiveSession {
 
 impl LiveSession {
     pub(crate) fn spawn(engine: Arc<WhisperEngine>) -> Result<Arc<Self>, WhisperEngineError> {
-        let state = engine
-            .ctx
-            .create_state()
-            .map_err(|e| WhisperEngineError::Inference { msg: e.to_string() })?;
+        let state = engine.new_state()?;
         let (tx, rx) = mpsc::channel();
         let segments = Arc::new(Mutex::new(Vec::new()));
-        let out = Arc::clone(&segments);
+        let failure = Arc::new(Mutex::new(None));
+        let (out, worker_failure) = (Arc::clone(&segments), Arc::clone(&failure));
         let handle = std::thread::Builder::new()
             .name("whisper-live".to_string())
-            .spawn(move || worker_loop(&engine, state, &rx, &out))
+            .spawn(move || worker_loop(&engine, state, &rx, &out, &worker_failure))
             .map_err(|e| WhisperEngineError::Inference {
                 msg: format!("failed to spawn inference worker: {e}"),
             })?;
@@ -106,21 +111,17 @@ impl LiveSession {
             tx: Mutex::new(Some(tx)),
             worker: Mutex::new(Some(handle)),
             segments,
+            failure,
         }))
     }
 }
 
-/// Lock, ignoring poisoning: every guarded value here stays consistent if a
-/// holder panics, and a panic in an exported method would cross the FFI.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 fn worker_loop(
     engine: &WhisperEngine,
-    mut state: WhisperState,
+    mut state: State,
     rx: &Receiver<Vec<f32>>,
     out: &Mutex<Vec<Segment>>,
+    failure: &Mutex<Option<String>>,
 ) {
     let mut window = Window::default();
     while let Ok(samples) = rx.recv() {
@@ -133,15 +134,21 @@ fn worker_loop(
         if !window.ready() {
             continue;
         }
-        let committed =
-            match run_inference(&mut state, &engine.config, &window.buf, window.start_ms()) {
-                Ok(segments) => window.commit(segments),
-                Err(e) => {
-                    log::error!("window inference failed: {e}");
-                    // Treat as silence so the buffer stays bounded.
-                    window.commit(Vec::new())
-                }
-            };
+        let committed = match engine.run_inference(&mut state, &window.buf, window.start_ms()) {
+            Ok(segments) => window.commit(segments),
+            Err(WhisperEngineError::Backend { msg }) => {
+                log::error!("transcription backend failed; recording continues untranscribed: {msg}");
+                *lock(failure) = Some(msg);
+                // Drain until finish so feed_pcm16 doesn't see a dead worker.
+                for _ in rx.iter() {}
+                return;
+            }
+            Err(e) => {
+                log::error!("window inference failed: {e}");
+                // Treat as silence so the buffer stays bounded.
+                window.commit(Vec::new())
+            }
+        };
         lock(out).extend(committed);
     }
 
@@ -154,8 +161,12 @@ fn worker_loop(
     if buf.len() < MIN_AUDIO_SAMPLES {
         buf.resize(MIN_AUDIO_SAMPLES, 0.0);
     }
-    match run_inference(&mut state, &engine.config, &buf, start_ms) {
+    match engine.run_inference(&mut state, &buf, start_ms) {
         Ok(segments) => lock(out).extend(segments),
+        Err(WhisperEngineError::Backend { msg }) => {
+            log::error!("transcription backend failed in final flush: {msg}");
+            *lock(failure) = Some(msg);
+        }
         Err(e) => log::error!("final flush inference failed: {e}"),
     }
 }

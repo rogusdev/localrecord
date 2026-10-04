@@ -1052,21 +1052,11 @@ name = "whisper-engine"
 version = "0.1.0"
 dependencies = [
  "android_logger",
+ "cc",
  "env_logger",
  "log",
  "thiserror",
  "uniffi",
- "whisper-rs",
-]
-
-[[package]]
-name = "whisper-rs"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2088172d00f936c348d6a72f488dc2660ab3f507263a195df308a3c2383229f6"
-dependencies = [
- "libc",
- "log",
  "whisper-rs-sys",
 ]
 

@@ -88,7 +88,7 @@ fun RecorderScreen(
                 )
                 if (!transcribing) {
                     Text(
-                        transcriptionError?.let { "Transcription failed to start: $it" }
+                        transcriptionError?.let { "Transcription failed: $it" }
                             ?: "No speech model downloaded",
                         color = if (transcriptionError != null) MaterialTheme.colorScheme.error
                         else Color.Unspecified,

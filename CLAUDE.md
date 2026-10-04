@@ -18,9 +18,15 @@ backup. Built as a personal replacement for Pixel Recorder on a OnePlus 15.
     ViewModel once the model is on disk
   - `DriveUploadWorker`: WorkManager, Drive REST resumable upload,
     `drive.file` scope, OAuth via Android Identity Services
-- **Transcription engine** (`rust-engine/`): Rust crate wrapping
-  `whisper-rs` 0.16 (whisper.cpp is bundled by `whisper-rs-sys`; nothing
-  vendored here), built for Android via `cargo-ndk`
+- **Transcription engine** (`rust-engine/`): Rust crate over
+  `whisper-rs-sys` 0.15 (raw bindings; it bundles and builds whisper.cpp,
+  nothing vendored here), built for Android via `cargo-ndk`
+  - `src/native.rs` is the safe layer: every whisper.cpp call that can throw
+    (ggml Vulkan throws, e.g. device lost) runs inside the C++ try/catch in
+    `src/catch.cpp`. A backend exception disables transcription for the
+    rest of the process; recording continues and the UI shows the error
+  - Adreno 840: ggml's fp16 Vulkan shaders hit `ErrorDeviceLost`, so the
+    engine sets `GGML_VK_DISABLE_F16` before the first model load
   - Exposed to Kotlin via **uniffi** (bindings loaded through JNA),
     generated into `app/src/main/java/uniffi/` (gitignored)
   - `vulkan` cargo feature → ggml Vulkan backend for the Adreno GPU
@@ -62,7 +68,8 @@ backup. Built as a personal replacement for Pixel Recorder on a OnePlus 15.
 
 - Rust: clear error types, no unwrap()/expect() in non-test code, prefer
   explicit over clever. Nothing exported may panic across the FFI (mutex
-  locks recover from poisoning). `WhisperEngineError` is a uniffi
+  locks recover from poisoning), and no C++ exception may reach Rust
+  outside `native.rs`'s catch. `WhisperEngineError` is a uniffi
   `flat_error`, so Kotlin gets `WhisperEngineException` with the Display
   text as its message
 - Kotlin: keep UI layer thin; all transcription logic lives in Rust,
@@ -81,9 +88,6 @@ backup. Built as a personal replacement for Pixel Recorder on a OnePlus 15.
 - Tune `STEP_MS` / `HOLDBACK_MS` / `MAX_WINDOW_MS` once we have real device
   latency numbers; consider whisper `audio_ctx` (encoder always runs a
   padded 30 s window otherwise) and whisper.cpp's VAD (needs a VAD model)
-- NDK r28's glslc (shaderc 2022.3) lacks GL_KHR_cooperative_matrix and
-  GL_EXT_integer_dot_product, so ggml builds those Vulkan matmul paths out;
-  a newer glslc on PATH may speed up GPU inference if Adreno supports them
 - Whether live transcription runs continuously during recording or only
   on-demand post-recording (battery/thermal tradeoff — revisit Pixel 8
   overheating lesson learned)
