@@ -5,7 +5,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import uniffi.whisper_engine.Segment
-import java.io.File
 
 /**
  * Process-wide bridge between RecordingService and the UI. The service is
@@ -29,13 +28,7 @@ object RecordingState {
     private val _transcriptionError = MutableStateFlow<String?>(null)
     val transcriptionError: StateFlow<String?> = _transcriptionError.asStateFlow()
 
-    /** WAV file being written right now; Drive upload must skip it. */
-    @Volatile
-    var activeFile: File? = null
-        private set
-
-    internal fun onRecordingStarted(file: File, transcribing: Boolean, error: String?) {
-        activeFile = file
+    internal fun onRecordingStarted(transcribing: Boolean, error: String?) {
         _liveSegments.value = emptyList()
         _elapsedMs.value = 0L
         _transcriptionActive.value = transcribing
@@ -59,7 +52,6 @@ object RecordingState {
     }
 
     internal fun onRecordingStopped() {
-        activeFile = null
         _isRecording.value = false
         _transcriptionActive.value = false
     }

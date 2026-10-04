@@ -4,18 +4,13 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.google.android.gms.common.api.ApiException
-import com.google.android.gms.common.api.CommonStatusCodes
 import com.localrecord.audio.RecordingService
 import com.localrecord.audio.RecordingState
 import com.localrecord.data.Recording
 import com.localrecord.data.RecordingRepository
-import com.localrecord.drive.DriveAuth
-import com.localrecord.drive.DriveUploadWorker
 import com.localrecord.engine.EngineManager
 import com.localrecord.model.ModelDownloader
 import com.localrecord.playback.Player
-import com.localrecord.settings.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -48,13 +43,6 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _recordings = MutableStateFlow<List<Recording>>(emptyList())
     val recordings: StateFlow<List<Recording>> = _recordings.asStateFlow()
-
-    private val _driveBackupEnabled =
-        MutableStateFlow(Settings.driveBackupEnabled(app))
-    val driveBackupEnabled: StateFlow<Boolean> = _driveBackupEnabled.asStateFlow()
-
-    private val _wifiOnlyUpload = MutableStateFlow(Settings.wifiOnlyUpload(app))
-    val wifiOnlyUpload: StateFlow<Boolean> = _wifiOnlyUpload.asStateFlow()
 
     private val _playback = MutableStateFlow<Playback?>(null)
     val playback: StateFlow<Playback?> = _playback.asStateFlow()
@@ -121,60 +109,6 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
             RecordingRepository.delete(recording)
             refreshRecordings()
         }
-    }
-
-    fun setWifiOnlyUpload(wifiOnly: Boolean) {
-        Settings.setWifiOnlyUpload(getApplication(), wifiOnly)
-        _wifiOnlyUpload.value = wifiOnly
-        // Queued work keeps the network constraint it was enqueued with.
-        if (_driveBackupEnabled.value) DriveUploadWorker.reschedule(getApplication())
-    }
-
-    /**
-     * Toggle Drive backup. Enabling may require user consent: the result's
-     * pendingIntent is surfaced through [onAuthorizationNeeded] for the
-     * Activity to launch.
-     */
-    fun setDriveBackupEnabled(
-        enabled: Boolean,
-        onAuthorizationNeeded: (android.app.PendingIntent) -> Unit,
-    ) {
-        val app = getApplication<Application>()
-        if (!enabled) {
-            Settings.setDriveBackupEnabled(app, false)
-            _driveBackupEnabled.value = false
-            return
-        }
-        viewModelScope.launch {
-            val result = try {
-                DriveAuth.authorize(app)
-            } catch (e: ApiException) {
-                // DEVELOPER_ERROR: no OAuth client for this package + signing
-                // key in Google Cloud (see README)
-                Log.e(TAG, "Drive authorization failed", e)
-                val status = CommonStatusCodes.getStatusCodeString(e.statusCode)
-                _message.value = "Drive authorization failed ($status). See README: Google Drive backup."
-                return@launch
-            }
-            if (result.hasResolution()) {
-                result.pendingIntent?.let(onAuthorizationNeeded)
-            } else {
-                confirmDriveEnabled()
-            }
-        }
-    }
-
-    /** The consent UI was dismissed or failed. */
-    fun onDriveConsentDenied() {
-        _message.value = "Drive backup not enabled: authorization was not granted"
-    }
-
-    /** Called after the consent UI completes successfully. */
-    fun confirmDriveEnabled() {
-        val app = getApplication<Application>()
-        Settings.setDriveBackupEnabled(app, true)
-        _driveBackupEnabled.value = true
-        DriveUploadWorker.enqueue(app)
     }
 
     private fun refreshRecordings() {

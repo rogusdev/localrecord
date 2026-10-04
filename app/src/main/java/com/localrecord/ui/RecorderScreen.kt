@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -29,7 +30,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -40,6 +40,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.localrecord.RecorderViewModel
@@ -51,7 +52,6 @@ import com.localrecord.model.ModelDownloader
 fun RecorderScreen(
     viewModel: RecorderViewModel,
     onRecordClick: () -> Unit,
-    onDriveToggle: (Boolean) -> Unit,
 ) {
     val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
     val elapsedMs by viewModel.elapsedMs.collectAsStateWithLifecycle()
@@ -60,8 +60,6 @@ fun RecorderScreen(
     val transcriptionError by viewModel.transcriptionError.collectAsStateWithLifecycle()
     val modelState by viewModel.modelState.collectAsStateWithLifecycle()
     val recordings by viewModel.recordings.collectAsStateWithLifecycle()
-    val driveEnabled by viewModel.driveBackupEnabled.collectAsStateWithLifecycle()
-    val wifiOnly by viewModel.wifiOnlyUpload.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -126,12 +124,6 @@ fun RecorderScreen(
                         HorizontalDivider()
                     }
                 }
-                DriveSettingsRow(
-                    driveEnabled = driveEnabled,
-                    wifiOnly = wifiOnly,
-                    onDriveToggle = onDriveToggle,
-                    onWifiOnlyToggle = viewModel::setWifiOnlyUpload,
-                )
             }
         }
     }
@@ -179,6 +171,7 @@ private fun LiveTranscript(segments: List<String>, modifier: Modifier = Modifier
 
 @Composable
 private fun RecordingRow(recording: Recording, onOpen: () -> Unit, onDelete: () -> Unit) {
+    val context = LocalContext.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -194,37 +187,11 @@ private fun RecordingRow(recording: Recording, onOpen: () -> Unit, onDelete: () 
                 style = MaterialTheme.typography.bodySmall,
             )
         }
+        IconButton(onClick = { shareRecording(context, recording) }) {
+            Icon(Icons.Default.Share, contentDescription = "Share", Modifier.size(20.dp))
+        }
         IconButton(onClick = onDelete) {
             Icon(Icons.Default.Delete, contentDescription = "Delete", Modifier.size(20.dp))
-        }
-    }
-}
-
-@Composable
-private fun DriveSettingsRow(
-    driveEnabled: Boolean,
-    wifiOnly: Boolean,
-    onDriveToggle: (Boolean) -> Unit,
-    onWifiOnlyToggle: (Boolean) -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Google Drive backup")
-            Switch(checked = driveEnabled, onCheckedChange = onDriveToggle)
-        }
-        if (driveEnabled) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Wi-Fi only", style = MaterialTheme.typography.bodyMedium)
-                Switch(checked = wifiOnly, onCheckedChange = onWifiOnlyToggle)
-            }
         }
     }
 }

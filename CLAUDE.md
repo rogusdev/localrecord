@@ -3,21 +3,27 @@
 ## Project: Local Whisper Voice Recorder for Android
 
 A privacy-first Android voice recorder with on-device, GPU-accelerated live
-transcription (Whisper via whisper.cpp/Vulkan) and optional Google Drive
-backup. Built as a personal replacement for Pixel Recorder on a OnePlus 15.
+transcription (Whisper via whisper.cpp/Vulkan), playback with a word-synced
+transcript, and sharing via the system share sheet (e.g. "Save to Drive").
+Built as a personal replacement for Pixel Recorder on a OnePlus 15.
 
 ## Architecture
 
 - **UI/Android layer** (`app/`): Kotlin, single-activity, Jetpack Compose
   - `RecordingService`: foreground service; one capture thread does
     AudioRecord (16 kHz mono PCM16) → WAV file + Rust session, drains
-    segments, flushes and writes the `.txt` transcript on stop
+    segments, flushes and writes the transcript on stop: a readable `.txt`
+    plus a `.json` with segment/word timings (`RecordingRepository`)
   - `RecordingState`: process-wide StateFlows the UI collects (service is
-    the only writer); also exposes the active file so Drive skips it
+    the only writer)
   - `EngineManager`: owns the single loaded model; preloaded by the
     ViewModel once the model is on disk
-  - `DriveUploadWorker`: WorkManager, Drive REST resumable upload,
-    `drive.file` scope, OAuth via Android Identity Services
+  - `Player` + `PlaybackScreen`: MediaPlayer playback; highlights the word
+    at the play position from the `.json` timings (whole segments for older
+    `.txt`-only recordings); tap a word or timestamp to seek
+  - Sharing: `shareRecording` sends the `.wav` + `.txt` through a
+    FileProvider to the share sheet. No Drive API/OAuth on purpose: that
+    needs a Google Cloud project
 - **Transcription engine** (`rust-engine/`): Rust crate over
   `whisper-rs-sys` 0.15 (raw bindings; it bundles and builds whisper.cpp,
   nothing vendored here), built for Android via `cargo-ndk`
@@ -40,7 +46,7 @@ backup. Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   discarded after its text is emitted or a pass found no speech.
 - **Model**: `ggml-base.en-q5_1.bin` (~60 MB), downloaded once from Hugging
   Face (URL pinned to a revision, SHA-256 verified) into app-private
-  storage. No other network use except opt-in Drive backup.
+  storage. No other network use.
 
 ## Build commands
 
@@ -79,9 +85,6 @@ backup. Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   the error, don't silently fall back to a network service (defeats the
   whole point of the app). Recording itself must keep working without
   transcription
-- Drive Wi-Fi-only must hold at runtime too: the worker re-checks for a
-  metered network between files, and changing the setting reschedules the
-  queued work
 
 ## Open questions / decisions pending
 
@@ -96,5 +99,3 @@ backup. Built as a personal replacement for Pixel Recorder on a OnePlus 15.
 
 - Don't add any cloud STT integration, even as an optional toggle —
   defeats the privacy/offline goal of this project
-- Don't default the Drive upload to running over cellular without an
-  explicit Wi-Fi-only setting

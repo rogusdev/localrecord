@@ -18,7 +18,6 @@ import android.util.Log
 import com.localrecord.MainActivity
 import com.localrecord.R
 import com.localrecord.data.RecordingRepository
-import com.localrecord.drive.DriveUploadWorker
 import com.localrecord.engine.EngineManager
 import uniffi.whisper_engine.LiveSession
 import uniffi.whisper_engine.Segment
@@ -103,7 +102,7 @@ class RecordingService : Service() {
             loadError = e.message
             null
         }
-        RecordingState.onRecordingStarted(wavFile, transcribing = session != null, error = loadError)
+        RecordingState.onRecordingStarted(transcribing = session != null, error = loadError)
 
         val transcript = mutableListOf<Segment>()
         val publish = { segments: List<Segment> ->
@@ -125,7 +124,6 @@ class RecordingService : Service() {
             RecordingRepository.writeTranscript(wavFile, transcript)
         }
         RecordingState.onRecordingStopped()
-        DriveUploadWorker.enqueue(this)
         stopSelf()
     }
 

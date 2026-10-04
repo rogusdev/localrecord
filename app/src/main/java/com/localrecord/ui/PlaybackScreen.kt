@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -39,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
@@ -61,6 +63,7 @@ fun PlaybackScreen(playback: Playback, onBack: () -> Unit) {
     val player = playback.player
     val positionMs by player.positionMs.collectAsStateWithLifecycle()
     val isPlaying by player.isPlaying.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     BackHandler(onBack = onBack)
 
     Scaffold(
@@ -70,6 +73,11 @@ fun PlaybackScreen(playback: Playback, onBack: () -> Unit) {
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { shareRecording(context, playback.recording) }) {
+                        Icon(Icons.Default.Share, contentDescription = "Share")
                     }
                 },
             )
@@ -143,7 +151,7 @@ private fun SegmentRow(segment: Segment, highlightedWord: Int?, onSeek: (Long) -
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier
-                .clickable { onSeek(segment.startMs) }
+                .clickable { onSeek(segment.words.firstOrNull()?.startMs ?: segment.startMs) }
                 .padding(top = 3.dp),
         )
         Spacer(Modifier.width(12.dp))
@@ -205,8 +213,8 @@ private fun PlayerControls(
 
 /**
  * The word being spoken at [positionMs], or the last one before it (in a
- * pause, possibly the previous segment's last word). Segments without word
- * timings are highlighted whole.
+ * pause, possibly the previous segment's last word; before any word, the
+ * first). Segments without word timings are highlighted whole.
  */
 private fun cursorAt(segments: List<Segment>, positionMs: Long): Cursor? {
     val segment = segments.indexOfLast { it.startMs <= positionMs }
@@ -219,7 +227,7 @@ private fun cursorAt(segments: List<Segment>, positionMs: Long): Cursor? {
     return if (previous != null && previous.words.isNotEmpty()) {
         Cursor(segment - 1, previous.words.lastIndex)
     } else {
-        Cursor(segment, null)
+        Cursor(segment, 0)
     }
 }
 

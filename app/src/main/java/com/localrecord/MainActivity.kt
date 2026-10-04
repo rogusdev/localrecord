@@ -1,12 +1,10 @@
 package com.localrecord
 
 import android.Manifest
-import android.app.PendingIntent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
@@ -33,13 +31,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private val driveConsent = registerForActivityResult(
-        ActivityResultContracts.StartIntentSenderForResult()
-    ) { result ->
-        if (result.resultCode == RESULT_OK) viewModel.confirmDriveEnabled()
-        else viewModel.onDriveConsentDenied()
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -52,7 +43,6 @@ class MainActivity : ComponentActivity() {
                     ?: RecorderScreen(
                         viewModel = viewModel,
                         onRecordClick = ::onRecordClick,
-                        onDriveToggle = ::onDriveToggle,
                     )
             }
         }
@@ -76,12 +66,4 @@ class MainActivity : ComponentActivity() {
 
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
-
-    private fun onDriveToggle(enabled: Boolean) {
-        viewModel.setDriveBackupEnabled(enabled) { pendingIntent: PendingIntent ->
-            driveConsent.launch(
-                IntentSenderRequest.Builder(pendingIntent.intentSender).build()
-            )
-        }
-    }
 }

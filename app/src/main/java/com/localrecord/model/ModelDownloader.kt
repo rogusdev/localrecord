@@ -16,8 +16,7 @@ import java.security.MessageDigest
 
 /**
  * One-time download of the Whisper model file. After this completes the app
- * never needs the network for transcription again (Drive backup is separate
- * and optional).
+ * never needs the network again.
  */
 object ModelDownloader {
 

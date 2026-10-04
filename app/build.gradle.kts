@@ -62,11 +62,7 @@ dependencies {
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons)
     implementation(libs.kotlinx.coroutines.android)
-    implementation(libs.kotlinx.coroutines.play.services)
-    implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.okhttp)
     // uniffi-generated Kotlin bindings load the Rust cdylib through JNA
     implementation("${libs.jna.get()}@aar")
-    // Drive scope authorization (account picker + consent + access token)
-    implementation(libs.play.services.auth)
 }

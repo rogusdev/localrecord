@@ -1,12 +1,13 @@
 # LocalRecord
 
 Privacy-first Android voice recorder with on-device, GPU-accelerated live
-transcription (Whisper via whisper.cpp/Vulkan) and optional Google Drive
-backup. Personal replacement for Pixel Recorder, targeting a OnePlus 15
+transcription (Whisper via whisper.cpp/Vulkan), playback with a word-synced
+transcript, and sharing to any app (e.g. Drive's "Save to Drive"). Personal
+replacement for Pixel Recorder, targeting a OnePlus 15
 (Snapdragon 8 Elite Gen 5 / Adreno GPU).
 
-No audio ever leaves the device for transcription. Network is used only for
-the one-time model download and (opt-in) Drive backup.
+No audio ever leaves the device unless you share it. Network is used only for
+the one-time model download.
 
 ## Layout
 
@@ -46,19 +47,8 @@ First run: the app offers a one-time download of `ggml-base.en-q5_1.bin`
 Recording works without the model; live transcription starts once it's
 present.
 
-## Google Drive backup (optional, off by default)
+## Sharing / backup
 
-Uploads finished recordings + transcripts to a `LocalRecord` folder using the
-Drive REST API (`drive.file` scope — app-created files only), batched through
-WorkManager. Wi-Fi-only by default; cellular is an explicit toggle.
-
-One-time setup to make auth work:
-
-1. Create a Google Cloud project, enable the **Google Drive API**.
-2. Configure the OAuth consent screen (External, test users: your account).
-3. Create an **OAuth client ID → Android** with package `com.localrecord`
-   and your debug signing SHA-1
-   (`keytool -list -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android`).
-
-No client ID is embedded in the app; Android Identity Services resolves it
-from package name + signature.
+Each recording has a Share button (list and playback screen) that hands the
+`.wav` and `.txt` to the system share sheet — pick Drive's "Save to Drive" to
+back it up. Word timings stay in the local `.json`.
