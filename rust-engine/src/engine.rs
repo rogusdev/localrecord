@@ -101,11 +101,10 @@ impl WhisperEngine {
         if config.use_gpu {
             std::env::set_var(DISABLE_GPU_FP16_ENV, "1");
         }
-        let language = CString::new(config.language.as_str()).map_err(|_| {
-            WhisperEngineError::ModelLoad {
+        let language =
+            CString::new(config.language.as_str()).map_err(|_| WhisperEngineError::ModelLoad {
                 msg: "language contains a NUL byte".to_string(),
-            }
-        })?;
+            })?;
         let ctx = Context::load(&model_path, config.use_gpu, FLASH_ATTN)
             .map_err(|e| WhisperEngineError::ModelLoad { msg: e.to_string() })?;
         log::info!(
@@ -198,7 +197,12 @@ pub(crate) struct Pass<'a> {
 fn drop_repeated_segments(segments: &mut Vec<Segment>) {
     let words = |text: &str| -> Vec<String> {
         text.split_whitespace()
-            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase())
+            .map(|w| {
+                w.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
+                    .to_lowercase()
+            })
             .filter(|w| !w.is_empty())
             .collect()
     };
@@ -212,7 +216,6 @@ fn drop_repeated_segments(segments: &mut Vec<Segment>) {
         !repeat
     });
 }
-
 
 impl WhisperEngine {
     /// The first GPU pass compiles ggml's Vulkan pipelines (~2 s on the
@@ -352,7 +355,13 @@ mod tests {
         let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(
             texts,
-            ["We're going to draw an animal.", "Okay.", "Yes.", "Yes.", "Then the next thing we do is this."]
+            [
+                "We're going to draw an animal.",
+                "Okay.",
+                "Yes.",
+                "Yes.",
+                "Then the next thing we do is this."
+            ]
         );
     }
 }

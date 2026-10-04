@@ -21,7 +21,12 @@ fn parse(bytes: &[u8]) -> Result<Vec<f32>, String> {
     let mut pos = 12;
     while pos + 8 <= bytes.len() {
         let id = &bytes[pos..pos + 4];
-        let declared = u32::from_le_bytes([bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]]) as usize;
+        let declared = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]) as usize;
         let body = pos + 8;
         let remaining = bytes.len() - body;
         match id {
@@ -29,7 +34,11 @@ fn parse(bytes: &[u8]) -> Result<Vec<f32>, String> {
                 let fmt = bytes.get(body..body + 16).ok_or("truncated fmt chunk")?;
                 let u16_at = |i: usize| u16::from_le_bytes([fmt[i], fmt[i + 1]]);
                 let rate = u32::from_le_bytes([fmt[4], fmt[5], fmt[6], fmt[7]]);
-                if u16_at(0) != PCM_FORMAT || u16_at(2) != 1 || rate as usize != SAMPLE_RATE_HZ || u16_at(14) != 16 {
+                if u16_at(0) != PCM_FORMAT
+                    || u16_at(2) != 1
+                    || rate as usize != SAMPLE_RATE_HZ
+                    || u16_at(14) != 16
+                {
                     return Err(format!(
                         "need PCM mono 16 kHz 16-bit, got format {} channels {} rate {rate} bits {}",
                         u16_at(0),
@@ -45,7 +54,11 @@ fn parse(bytes: &[u8]) -> Result<Vec<f32>, String> {
                 }
                 // A recording cut short (crash) can have a size of 0 or past
                 // the end of the file; take what is there.
-                let len = if declared == 0 || declared > remaining { remaining } else { declared };
+                let len = if declared == 0 || declared > remaining {
+                    remaining
+                } else {
+                    declared
+                };
                 return Ok(bytes[body..body + len]
                     .chunks_exact(2)
                     .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
@@ -75,7 +88,9 @@ mod tests {
         b.extend_from_slice(&16u16.to_le_bytes());
         b.extend_from_slice(b"data");
         b.extend_from_slice(&data_size_field.to_le_bytes());
-        samples.iter().for_each(|s| b.extend_from_slice(&s.to_le_bytes()));
+        samples
+            .iter()
+            .for_each(|s| b.extend_from_slice(&s.to_le_bytes()));
         b
     }
 

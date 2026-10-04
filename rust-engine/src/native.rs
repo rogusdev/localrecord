@@ -81,7 +81,10 @@ fn catch_exceptions<F: FnOnce() -> R, R>(f: F) -> Result<R, NativeError> {
         }
     }
 
-    let mut call = Call { f: Some(f), out: None };
+    let mut call = Call {
+        f: Some(f),
+        out: None,
+    };
     let mut err = [0 as c_char; EXCEPTION_MSG_CAP];
     // SAFETY: `trampoline` matches the callback type and `call` and `err`
     // outlive the call.
@@ -147,12 +150,17 @@ pub(crate) struct FullParams<'a> {
 
 impl<'a> FullParams<'a> {
     pub(crate) fn greedy(language: &'a CStr) -> Self {
-        Self::with_strategy(sys::whisper_sampling_strategy_WHISPER_SAMPLING_GREEDY, language)
+        Self::with_strategy(
+            sys::whisper_sampling_strategy_WHISPER_SAMPLING_GREEDY,
+            language,
+        )
     }
 
     pub(crate) fn beam_search(language: &'a CStr, beam_size: c_int) -> Self {
-        let mut params =
-            Self::with_strategy(sys::whisper_sampling_strategy_WHISPER_SAMPLING_BEAM_SEARCH, language);
+        let mut params = Self::with_strategy(
+            sys::whisper_sampling_strategy_WHISPER_SAMPLING_BEAM_SEARCH,
+            language,
+        );
         params.raw.beam_search.beam_size = beam_size;
         params
     }
@@ -218,7 +226,11 @@ impl State {
 
     /// Run full inference over `samples` (16 kHz mono f32), replacing the
     /// previous result.
-    pub(crate) fn full(&mut self, params: &FullParams<'_>, samples: &[f32]) -> Result<(), NativeError> {
+    pub(crate) fn full(
+        &mut self,
+        params: &FullParams<'_>,
+        samples: &[f32],
+    ) -> Result<(), NativeError> {
         let n_samples = c_int::try_from(samples.len())
             .map_err(|_| NativeError::Failed("audio buffer too long".to_string()))?;
         let (ctx, state, raw) = (self.ctx.0.as_ptr(), self.ptr.as_ptr(), params.raw);
@@ -296,7 +308,9 @@ unsafe fn c_str_lossy(ptr: *const c_char) -> String {
         String::new()
     } else {
         // SAFETY: per the contract above.
-        unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -316,7 +330,11 @@ pub(crate) fn install_logging() {
     unsafe { sys::whisper_log_set(Some(log_trampoline), std::ptr::null_mut()) }
 }
 
-unsafe extern "C" fn log_trampoline(level: sys::ggml_log_level, text: *const c_char, _: *mut c_void) {
+unsafe extern "C" fn log_trampoline(
+    level: sys::ggml_log_level,
+    text: *const c_char,
+    _: *mut c_void,
+) {
     if text.is_null() {
         return;
     }

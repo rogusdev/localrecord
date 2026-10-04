@@ -40,11 +40,15 @@ impl SpeakerEncoder {
             num_threads: VOICEPRINT_THREADS,
             ..Default::default()
         };
-        let extractor =
-            SpeakerEmbeddingExtractor::create(&config).ok_or_else(|| WhisperEngineError::ModelLoad {
+        let extractor = SpeakerEmbeddingExtractor::create(&config).ok_or_else(|| {
+            WhisperEngineError::ModelLoad {
                 msg: format!("could not load speaker model {model_path}"),
-            })?;
-        log::info!("speaker model loaded from {model_path} (dim {})", extractor.dim());
+            }
+        })?;
+        log::info!(
+            "speaker model loaded from {model_path} (dim {})",
+            extractor.dim()
+        );
         Ok(Arc::new(Self { extractor }))
     }
 }
@@ -164,7 +168,10 @@ impl Speakers {
             .max_by(|a, b| a.1.total_cmp(&b.1));
         let index = match best {
             Some((i, _)) => {
-                self.sums[i].iter_mut().zip(&voiceprint).for_each(|(s, v)| *s += v);
+                self.sums[i]
+                    .iter_mut()
+                    .zip(&voiceprint)
+                    .for_each(|(s, v)| *s += v);
                 i
             }
             None => {

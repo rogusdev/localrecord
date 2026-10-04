@@ -170,24 +170,31 @@ fn worker_loop(
             prompt: prompt.as_deref(),
             ..Pass::default()
         };
-        let mut committed = match engine.run_inference(&mut state, &window.buf, window.start_ms(), &pass) {
-            Ok(segments) => window.commit(segments),
-            Err(WhisperEngineError::Backend { msg }) => {
-                log::error!("transcription backend failed; recording continues untranscribed: {msg}");
-                *lock(&shared.failure) = Some(msg);
-                lock(&shared.tentative).clear();
-                // Drain until finish so feed_pcm16 doesn't see a dead worker.
-                for _ in rx.iter() {}
-                return;
-            }
-            Err(e) => {
-                log::error!("window inference failed: {e}");
-                // Treat as silence so the buffer stays bounded.
-                window.commit(Vec::new())
-            }
-        };
+        let mut committed =
+            match engine.run_inference(&mut state, &window.buf, window.start_ms(), &pass) {
+                Ok(segments) => window.commit(segments),
+                Err(WhisperEngineError::Backend { msg }) => {
+                    log::error!(
+                        "transcription backend failed; recording continues untranscribed: {msg}"
+                    );
+                    *lock(&shared.failure) = Some(msg);
+                    lock(&shared.tentative).clear();
+                    // Drain until finish so feed_pcm16 doesn't see a dead worker.
+                    for _ in rx.iter() {}
+                    return;
+                }
+                Err(e) => {
+                    log::error!("window inference failed: {e}");
+                    // Treat as silence so the buffer stays bounded.
+                    window.commit(Vec::new())
+                }
+            };
         if let Some(tracker) = speakers.as_mut() {
-            tracker.label(&mut committed.segments, &committed.audio, committed.audio_start_ms);
+            tracker.label(
+                &mut committed.segments,
+                &committed.audio,
+                committed.audio_start_ms,
+            );
         }
         context.extend(&committed.segments);
         lock(&shared.out).extend(committed.segments);
@@ -196,7 +203,14 @@ fn worker_loop(
 
     // Channel closed (finish or session dropped): flush whatever remains.
     if !window.buf.is_empty() {
-        flush(engine, &mut state, speakers.as_mut(), &window, &context, shared);
+        flush(
+            engine,
+            &mut state,
+            speakers.as_mut(),
+            &window,
+            &context,
+            shared,
+        );
     }
     lock(&shared.tentative).clear();
 }
@@ -251,7 +265,11 @@ impl Context {
         // Keep the last PROMPT_CHARS characters, from a word start.
         let chars = self.text.chars().count();
         if chars > PROMPT_CHARS {
-            let cut = self.text.char_indices().nth(chars - PROMPT_CHARS).map_or(0, |(i, _)| i);
+            let cut = self
+                .text
+                .char_indices()
+                .nth(chars - PROMPT_CHARS)
+                .map_or(0, |(i, _)| i);
             let start = self.text[cut..].find(' ').map_or(cut, |i| cut + i + 1);
             self.text.drain(..start);
         }
@@ -395,7 +413,9 @@ mod tests {
         w.commit(vec![seg(0, 3_000), seg(3_000, 5_000)]);
         w.push(&vec![0.0; STEP_SAMPLES]);
         assert_eq!(w.start_ms(), 3_000);
-        let out = w.commit(vec![seg(3_000, 6_500), seg(6_500, 9_000)]).segments;
+        let out = w
+            .commit(vec![seg(3_000, 6_500), seg(6_500, 9_000)])
+            .segments;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].end_ms, 6_500);
         assert_eq!(w.start_ms(), 6_500);
@@ -440,7 +460,9 @@ mod tests {
     #[test]
     fn max_window_emits_everything() {
         let mut w = window_of(MAX_WINDOW_MS);
-        let out = w.commit(vec![seg(0, 12_000), seg(12_000, MAX_WINDOW_MS as i64)]).segments;
+        let out = w
+            .commit(vec![seg(0, 12_000), seg(12_000, MAX_WINDOW_MS as i64)])
+            .segments;
         assert_eq!(out.len(), 2);
         assert!(w.buf.is_empty());
         assert_eq!(w.start_ms(), MAX_WINDOW_MS as i64);
