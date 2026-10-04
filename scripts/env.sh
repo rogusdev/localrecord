@@ -8,13 +8,12 @@ NDK_VERSION="28.2.13676358"
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
 export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
 
-# whisper-rs-sys configures whisper.cpp with -DCMAKE_SYSTEM_NAME=Android and no
-# toolchain file, which makes CMake use its built-in Android support — that
-# expects the pre-r19 NDK layout (platforms/android-21/arch-arm64) and fails on
-# r28's unified sysroot. The cmake crate forwards this env var, and the NDK's
-# own toolchain file knows the modern layout.
-export CMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
-
 # glslc (Vulkan shader compiler) ships with the NDK; ggml's Vulkan backend
 # needs it on PATH at build time to compile compute shaders.
 export PATH="$ANDROID_NDK_HOME/shader-tools/linux-x86_64:$ANDROID_HOME/platform-tools:$PATH"
+
+# aarch64 hosts: the SDK/NDK's x86_64 binaries (aapt2, glslc) run under
+# qemu-user via binfmt and need an x86_64 glibc/libstdc++ root to load from.
+if [ "$(uname -m)" = aarch64 ]; then
+    export QEMU_LD_PREFIX="${QEMU_LD_PREFIX:-$HOME/.cache/localrecord/x86root}"
+fi

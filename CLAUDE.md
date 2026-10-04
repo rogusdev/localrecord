@@ -50,8 +50,11 @@ backup. Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   `cargo run --release --example live_check -- <model.bin> <audio.raw>`
   — prints live vs one-shot transcripts; use it when changing session.rs
 - The NDK toolchain and AGP's aapt2 are x86_64-only binaries. On an aarch64
-  host they need x86_64 glibc via `QEMU_LD_PREFIX` (enough for aapt2/Gradle
-  Kotlin compile); NDK clang still fails there, so build `jniLibs` on x86_64
+  host, aapt2/llvm-strip/glslc run under qemu-user with an x86_64 root
+  (extracted amd64 debs: libc6, libgcc-s1, libstdc++6, zlib1g) at
+  `QEMU_LD_PREFIX` — `env.sh` defaults it to `~/.cache/localrecord/x86root`.
+  `build-rust.sh` compiles with host clang-18/lld via a stand-in NDK
+  (`scripts/host-ndk.sh`), which also supplies Vulkan-Headers (`vulkan.hpp`)
 - Physical device only for GPU/Vulkan testing — emulator Vulkan compute
   is unreliable, don't trust emulator results for transcription latency
 
@@ -78,6 +81,9 @@ backup. Built as a personal replacement for Pixel Recorder on a OnePlus 15.
 - Tune `STEP_MS` / `HOLDBACK_MS` / `MAX_WINDOW_MS` once we have real device
   latency numbers; consider whisper `audio_ctx` (encoder always runs a
   padded 30 s window otherwise) and whisper.cpp's VAD (needs a VAD model)
+- NDK r28's glslc (shaderc 2022.3) lacks GL_KHR_cooperative_matrix and
+  GL_EXT_integer_dot_product, so ggml builds those Vulkan matmul paths out;
+  a newer glslc on PATH may speed up GPU inference if Adreno supports them
 - Whether live transcription runs continuously during recording or only
   on-demand post-recording (battery/thermal tradeoff — revisit Pixel 8
   overheating lesson learned)
