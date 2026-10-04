@@ -39,7 +39,15 @@ class MainActivity : ComponentActivity() {
                 else lightColorScheme()
             ) {
                 val playback by viewModel.playback.collectAsStateWithLifecycle()
-                playback?.let { PlaybackScreen(it, onBack = viewModel::closePlayback) }
+                val finalizing by viewModel.finalizing.collectAsStateWithLifecycle()
+                playback?.let {
+                    PlaybackScreen(
+                        it,
+                        finalizing = it.recording.wavFile.name in finalizing,
+                        onTranscribeAgain = { viewModel.transcribeAgain(it.recording) },
+                        onBack = viewModel::closePlayback,
+                    )
+                }
                     ?: RecorderScreen(
                         viewModel = viewModel,
                         onRecordClick = ::onRecordClick,

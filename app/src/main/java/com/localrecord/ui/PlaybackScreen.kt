@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -21,10 +22,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -59,7 +62,12 @@ private class SegmentText(val text: String, val wordRanges: List<IntRange>)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PlaybackScreen(playback: Playback, onBack: () -> Unit) {
+fun PlaybackScreen(
+    playback: Playback,
+    finalizing: Boolean,
+    onTranscribeAgain: () -> Unit,
+    onBack: () -> Unit,
+) {
     val player = playback.player
     val positionMs by player.positionMs.collectAsStateWithLifecycle()
     val isPlaying by player.isPlaying.collectAsStateWithLifecycle()
@@ -76,6 +84,13 @@ fun PlaybackScreen(playback: Playback, onBack: () -> Unit) {
                     }
                 },
                 actions = {
+                    if (finalizing) {
+                        CircularProgressIndicator(Modifier.padding(12.dp).size(24.dp), strokeWidth = 2.dp)
+                    } else {
+                        IconButton(onClick = onTranscribeAgain) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Transcribe again")
+                        }
+                    }
                     IconButton(onClick = { shareRecording(context, playback.recording) }) {
                         Icon(Icons.Default.Share, contentDescription = "Share")
                     }

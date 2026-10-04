@@ -15,9 +15,10 @@ import java.io.IOException
 import java.security.MessageDigest
 
 /**
- * One-time download of the model files: Whisper for transcription and a
- * speaker-embedding model for live speaker labels. After this completes the
- * app never needs the network again.
+ * One-time download of the model files: Whisper base.en for live
+ * transcription, Whisper small.en for the final pass after recording, and a
+ * speaker-embedding model for speaker labels. After this completes the app
+ * never needs the network again.
  */
 object ModelDownloader {
 
@@ -45,7 +46,18 @@ object ModelDownloader {
         bytes = 28_281_164,
     )
 
-    private val ALL = listOf(WHISPER, SPEAKER)
+    // Final whole-recording pass: on AMI meeting excerpts 24% WER vs 28% for
+    // live base.en with context; medium.en and large-v3-turbo were no better
+    // at 3-5x the time.
+    private val FINAL_WHISPER = ModelFile(
+        name = "ggml-small.en-q5_1.bin",
+        url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/" +
+            "5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.en-q5_1.bin",
+        sha256 = "bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30",
+        bytes = 190_098_681,
+    )
+
+    private val ALL = listOf(WHISPER, SPEAKER, FINAL_WHISPER)
 
     /** Model files earlier builds downloaded; deleted to reclaim space. */
     private val OBSOLETE = listOf("3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx")
@@ -68,6 +80,8 @@ object ModelDownloader {
     fun modelFile(context: Context): File = fileFor(context, WHISPER)
 
     fun speakerModelFile(context: Context): File = fileFor(context, SPEAKER)
+
+    fun finalModelFile(context: Context): File = fileFor(context, FINAL_WHISPER)
 
     private fun fileFor(context: Context, model: ModelFile): File =
         File(File(context.filesDir, "models").apply { mkdirs() }, model.name)

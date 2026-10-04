@@ -1,10 +1,12 @@
 use std::ffi::{c_int, CStr, CString};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::native::{Context, FullParams, NativeError, State};
 use crate::session::{LiveSession, MIN_AUDIO_SAMPLES};
-use crate::speakers::SpeakerEncoder;
+use crate::speakers::{self, SpeakerEncoder};
+use crate::wav;
 use crate::{lock, pcm16_bytes_to_f32};
 
 /// Read by ggml when it creates the Vulkan device (first model load). On the
@@ -15,6 +17,11 @@ const DISABLE_GPU_FP16_ENV: &str = "GGML_VK_DISABLE_F16";
 
 /// Flash attention: Adreno 840 fp32, same clip, 0.68 s vs 0.84 s per pass.
 const FLASH_ATTN: bool = true;
+/// Beam width for whole-recording passes (whisper's default; live is greedy).
+const WHOLE_RECORDING_BEAM_SIZE: c_int = 5;
+/// A segment repeating one of the previous two word for word, with at least
+/// this many words, is whisper's repetition loop rather than speech.
+const LOOP_MIN_WORDS: usize = 4;
 
 /// Flat so Kotlin exceptions carry the Display text below as their message.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -30,6 +37,8 @@ pub enum WhisperEngineError {
     Backend { msg: String },
     #[error("audio buffer is empty")]
     EmptyAudio,
+    #[error("can't read audio file: {msg}")]
+    AudioFile { msg: String },
     #[error("live session already finished")]
     SessionFinished,
 }
@@ -121,7 +130,44 @@ impl WhisperEngine {
             return Err(WhisperEngineError::EmptyAudio);
         }
         let mut state = self.new_state()?;
-        self.run_inference(&mut state, &samples, 0, None)
+        self.run_inference(&mut state, &samples, 0, &Pass::default())
+    }
+
+    /// Accurate transcription of a whole recording (16 kHz mono 16-bit WAV),
+    /// meant as the final pass after recording stops: one call over all of
+    /// it, with beam search. With `speakers`, segments get speaker labels.
+    /// Blocking, and slow on long recordings; call from a background thread.
+    pub fn transcribe_wav(
+        &self,
+        path: String,
+        speakers: Option<Arc<SpeakerEncoder>>,
+    ) -> Result<Vec<Segment>, WhisperEngineError> {
+        let mut samples = wav::read_pcm16_mono_16k(Path::new(&path))
+            .map_err(|msg| WhisperEngineError::AudioFile { msg })?;
+        if samples.is_empty() {
+            return Err(WhisperEngineError::EmptyAudio);
+        }
+        let audio_len = samples.len();
+        if audio_len < MIN_AUDIO_SAMPLES {
+            samples.resize(MIN_AUDIO_SAMPLES, 0.0);
+        }
+        let started = Instant::now();
+        let mut state = self.new_state()?;
+        let whole = Pass {
+            whole_recording: true,
+            ..Pass::default()
+        };
+        let mut segments = self.run_inference(&mut state, &samples, 0, &whole)?;
+        drop_repeated_segments(&mut segments);
+        if let Some(encoder) = speakers {
+            speakers::label_recording(&encoder, &mut segments, &samples[..audio_len]);
+        }
+        log::info!(
+            "final pass over {} s took {:?}",
+            audio_len / crate::session::SAMPLE_RATE_HZ,
+            started.elapsed()
+        );
+        Ok(segments)
     }
 
     /// Start a live sliding-window transcription session. Feed audio as it
@@ -135,6 +181,37 @@ impl WhisperEngine {
     }
 }
 
+/// How one inference pass decodes.
+#[derive(Default)]
+pub(crate) struct Pass<'a> {
+    /// Text that came just before the audio (live: the committed transcript).
+    pub prompt: Option<&'a CStr>,
+    /// The whole recording in one call, decoded with beam search.
+    pub whole_recording: bool,
+}
+
+/// Drop whisper repetition loops: segments that repeat one of the two before
+/// them word for word (ignoring case and punctuation) and have at least
+/// `LOOP_MIN_WORDS` words.
+fn drop_repeated_segments(segments: &mut Vec<Segment>) {
+    let words = |text: &str| -> Vec<String> {
+        text.split_whitespace()
+            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect()
+    };
+    let mut recent: Vec<Vec<String>> = Vec::new();
+    segments.retain(|segment| {
+        let key = words(&segment.text);
+        let repeat = key.len() >= LOOP_MIN_WORDS && recent.iter().rev().take(2).any(|r| *r == key);
+        if !repeat {
+            recent.push(key);
+        }
+        !repeat
+    });
+}
+
+
 impl WhisperEngine {
     /// The first GPU pass compiles ggml's Vulkan pipelines (~2 s on the
     /// Adreno 840). Run one on silence at load so the first live pass isn't
@@ -144,7 +221,7 @@ impl WhisperEngine {
         let silence = vec![0.0; MIN_AUDIO_SAMPLES];
         match self
             .new_state()
-            .and_then(|mut state| self.run_inference(&mut state, &silence, 0, None))
+            .and_then(|mut state| self.run_inference(&mut state, &silence, 0, &Pass::default()))
         {
             Ok(_) => log::info!("GPU warm-up took {:?}", started.elapsed()),
             Err(e) => log::error!("GPU warm-up failed: {e}"),
@@ -157,18 +234,21 @@ impl WhisperEngine {
     }
 
     /// Run whisper full inference over `samples`, returning segments offset
-    /// by `base_ms` (the recording-relative time of `samples[0]`). `prompt`
-    /// is text that came just before the audio.
+    /// by `base_ms` (the recording-relative time of `samples[0]`).
     pub(crate) fn run_inference(
         &self,
         state: &mut State,
         samples: &[f32],
         base_ms: i64,
-        prompt: Option<&CStr>,
+        pass: &Pass<'_>,
     ) -> Result<Vec<Segment>, WhisperEngineError> {
         self.check_usable()?;
-        let mut params = FullParams::greedy(&self.language);
-        if let Some(prompt) = prompt {
+        let mut params = if pass.whole_recording {
+            FullParams::beam_search(&self.language, WHOLE_RECORDING_BEAM_SIZE)
+        } else {
+            FullParams::greedy(&self.language)
+        };
+        if let Some(prompt) = pass.prompt {
             params.set_prompt(prompt);
         }
         let raw = params.raw_mut();
@@ -177,8 +257,10 @@ impl WhisperEngine {
         raw.print_progress = false;
         raw.print_realtime = false;
         raw.print_timestamps = false;
-        // Live passes re-read overlapping audio, so whisper's own carried-over
-        // text would repeat it; context comes only from `prompt`.
+        // No text carried between whisper's own 30 s windows: live passes
+        // re-read overlapping audio, and in whole-recording passes it set off a
+        // repetition loop on the phone (AMI TS3003a) for no WER gain on host.
+        // Context comes only from `prompt`.
         raw.no_context = true;
         raw.suppress_blank = true;
         // Suppress non-speech tokens (as openai-whisper does by default) so
@@ -236,5 +318,39 @@ impl WhisperEngine {
             Some(msg) => Err(WhisperEngineError::Backend { msg: msg.clone() }),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seg(text: &str) -> Segment {
+        Segment {
+            start_ms: 0,
+            end_ms: 0,
+            text: text.to_string(),
+            words: Vec::new(),
+            speaker: None,
+        }
+    }
+
+    #[test]
+    fn repetition_loops_are_dropped() {
+        let mut segments = vec![
+            seg("We're going to draw an animal."),
+            seg("we're going to draw an animal"),
+            seg("Okay."),
+            seg("We're going to draw an animal."),
+            seg("Yes."),
+            seg("Yes."),
+            seg("Then the next thing we do is this."),
+        ];
+        drop_repeated_segments(&mut segments);
+        let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["We're going to draw an animal.", "Okay.", "Yes.", "Yes.", "Then the next thing we do is this."]
+        );
     }
 }

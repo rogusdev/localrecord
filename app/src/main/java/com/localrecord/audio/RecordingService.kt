@@ -12,7 +12,10 @@ import android.content.pm.ServiceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import com.localrecord.MainActivity
@@ -23,6 +26,8 @@ import uniffi.whisper_engine.LiveSession
 import uniffi.whisper_engine.Segment
 import uniffi.whisper_engine.WhisperEngineException
 import java.io.File
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
 /**
@@ -32,12 +37,19 @@ import kotlin.concurrent.thread
  *
  * Capture format is 16 kHz mono PCM16: exactly what Whisper consumes, so no
  * resampling and one shared buffer for both the file and the engine.
+ *
+ * After a recording stops, its live transcript is saved as a draft and a
+ * final whole-recording pass (more accurate) is queued; it replaces the draft
+ * when done. [finalize] queues the same pass for an existing recording. The
+ * service stays in the foreground until capture and the queue are both done.
  */
 class RecordingService : Service() {
 
     companion object {
         const val ACTION_START = "com.localrecord.action.START_RECORDING"
         const val ACTION_STOP = "com.localrecord.action.STOP_RECORDING"
+        const val ACTION_FINALIZE = "com.localrecord.action.FINALIZE_TRANSCRIPT"
+        private const val EXTRA_WAV_PATH = "wav_path"
 
         const val SAMPLE_RATE_HZ = 16_000
         private const val TAG = "RecordingService"
@@ -59,12 +71,35 @@ class RecordingService : Service() {
                 Intent(context, RecordingService::class.java).setAction(ACTION_STOP)
             )
         }
+
+        /** Queue a final transcription pass for an existing recording. */
+        fun finalize(context: Context, wavFile: File) {
+            context.startForegroundService(
+                Intent(context, RecordingService::class.java)
+                    .setAction(ACTION_FINALIZE)
+                    .putExtra(EXTRA_WAV_PATH, wavFile.path)
+            )
+        }
+
+        /** Foreground type for the final pass: no mic, just CPU/GPU work. */
+        private val PROCESSING_TYPE =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            }
     }
 
     @Volatile
     private var capturing = false
-    /** Alive from start until the file and transcript are finalized. Main thread only. */
+    /** Alive from start until the file and live transcript are saved. Main thread only. */
     private var captureThread: Thread? = null
+
+    /** Final passes run one at a time, off the capture thread. */
+    private val finalizer: ExecutorService = Executors.newSingleThreadExecutor()
+    /** Queued or running final passes. Main thread only. */
+    private var pendingFinals = 0
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -72,20 +107,20 @@ class RecordingService : Service() {
         val active = captureThread?.isAlive == true
         when (intent?.action) {
             ACTION_START -> if (!active) startRecording()
-            // The capture thread finalizes and stops the service itself.
-            ACTION_STOP -> if (active) capturing = false else stopSelf()
+            // The capture thread saves the recording, then queues its final pass.
+            ACTION_STOP -> if (active) capturing = false else stopIfIdle()
+            ACTION_FINALIZE -> {
+                val path = intent.getStringExtra(EXTRA_WAV_PATH)
+                if (path != null) enqueueFinal(File(path)) else stopIfIdle()
+            }
         }
         return START_NOT_STICKY
     }
 
     private fun startRecording() {
-        startForeground(
-            NOTIFICATION_ID,
-            buildNotification(),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-        )
-        val wavFile = RecordingRepository.newRecordingFile(this)
         capturing = true
+        updateForeground()
+        val wavFile = RecordingRepository.newRecordingFile(this)
         // Model load (first use) and transcription flush block; keep them off
         // the main thread.
         captureThread = thread(name = "audio-capture") { captureLoop(wavFile) }
@@ -124,7 +159,61 @@ class RecordingService : Service() {
             RecordingRepository.writeTranscript(wavFile, transcript)
         }
         RecordingState.onRecordingStopped()
-        stopSelf()
+        val thisThread = Thread.currentThread()
+        mainHandler.post {
+            // A new recording may already have started its own capture thread.
+            if (captureThread === thisThread) captureThread = null
+            if (session != null) enqueueFinal(wavFile) else stopIfIdle()
+        }
+    }
+
+    /** Main thread. */
+    private fun enqueueFinal(wavFile: File) {
+        pendingFinals++
+        RecordingState.onFinalizing(wavFile, true)
+        updateForeground()
+        finalizer.execute {
+            finalizeTranscript(wavFile)
+            mainHandler.post {
+                pendingFinals--
+                RecordingState.onFinalizing(wavFile, false)
+                updateForeground()
+                stopIfIdle()
+            }
+        }
+    }
+
+    /** Replace the live draft with a whole-recording pass. Blocking; finalizer thread. */
+    private fun finalizeTranscript(wavFile: File) {
+        try {
+            val engine = EngineManager.finalEngineOrLoad(this) ?: return
+            val segments = engine.transcribeWav(wavFile.path, EngineManager.speakersOrLoad(this))
+            // An empty final pass over audio the draft found speech in is
+            // more likely a failure than the truth; keep the draft then.
+            if (segments.isNotEmpty() || !RecordingRepository.transcriptFileFor(wavFile).exists()) {
+                RecordingRepository.writeTranscript(wavFile, segments)
+            }
+        } catch (e: WhisperEngineException) {
+            Log.e(TAG, "final pass failed for ${wavFile.name}; keeping the live transcript", e)
+        }
+    }
+
+    /** Main thread. Foreground types and notification text for the current work. */
+    private fun updateForeground() {
+        val recording = captureThread?.isAlive == true || capturing
+        if (!recording && pendingFinals == 0) return
+        var types = 0
+        if (recording) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        if (pendingFinals > 0) types = types or PROCESSING_TYPE
+        startForeground(NOTIFICATION_ID, buildNotification(recording), types)
+    }
+
+    /** Main thread. */
+    private fun stopIfIdle() {
+        if (captureThread?.isAlive != true && !capturing && pendingFinals == 0) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
     }
 
     @SuppressLint("MissingPermission") // UI checks RECORD_AUDIO before starting
@@ -180,10 +269,11 @@ class RecordingService : Service() {
 
     override fun onDestroy() {
         capturing = false
+        finalizer.shutdown()
         super.onDestroy()
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(recording: Boolean): Notification {
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Recording", NotificationManager.IMPORTANCE_LOW)
@@ -198,13 +288,19 @@ class RecordingService : Service() {
             Intent(this, RecordingService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE,
         )
-        return Notification.Builder(this, CHANNEL_ID)
+        val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_mic)
-            .setContentTitle("Recording")
-            .setContentText("Transcribing on-device")
             .setContentIntent(tapIntent)
             .setOngoing(true)
-            .addAction(Notification.Action.Builder(null, "Stop", stopIntent).build())
-            .build()
+        return if (recording) {
+            builder.setContentTitle("Recording")
+                .setContentText("Transcribing on-device")
+                .addAction(Notification.Action.Builder(null, "Stop", stopIntent).build())
+                .build()
+        } else {
+            builder.setContentTitle("Finalizing transcript")
+                .setContentText("Re-transcribing the whole recording on-device")
+                .build()
+        }
     }
 }

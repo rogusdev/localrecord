@@ -13,7 +13,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 
-use crate::engine::{Segment, WhisperEngine, WhisperEngineError};
+use crate::engine::{Pass, Segment, WhisperEngine, WhisperEngineError};
 use crate::native::State;
 use crate::speakers::{SpeakerEncoder, SpeakerTracker};
 use crate::{lock, pcm16_bytes_to_f32};
@@ -166,8 +166,11 @@ fn worker_loop(
             continue;
         }
         let prompt = context.prompt();
-        let pass = engine.run_inference(&mut state, &window.buf, window.start_ms(), prompt.as_deref());
-        let mut committed = match pass {
+        let pass = Pass {
+            prompt: prompt.as_deref(),
+            ..Pass::default()
+        };
+        let mut committed = match engine.run_inference(&mut state, &window.buf, window.start_ms(), &pass) {
             Ok(segments) => window.commit(segments),
             Err(WhisperEngineError::Backend { msg }) => {
                 log::error!("transcription backend failed; recording continues untranscribed: {msg}");
@@ -212,7 +215,11 @@ fn flush(
         buf.resize(MIN_AUDIO_SAMPLES, 0.0);
     }
     let prompt = context.prompt();
-    match engine.run_inference(state, &buf, start_ms, prompt.as_deref()) {
+    let pass = Pass {
+        prompt: prompt.as_deref(),
+        ..Pass::default()
+    };
+    match engine.run_inference(state, &buf, start_ms, &pass) {
         Ok(mut segments) => {
             if let Some(tracker) = speakers {
                 tracker.label(&mut segments, &window.buf, start_ms);

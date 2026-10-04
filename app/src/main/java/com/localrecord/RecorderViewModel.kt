@@ -38,6 +38,7 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     val elapsedMs = RecordingState.elapsedMs
     val liveSegments = RecordingState.liveSegments
     val tentativeSegments = RecordingState.tentativeSegments
+    val finalizing = RecordingState.finalizing
     val transcriptionActive = RecordingState.transcriptionActive
     val transcriptionError = RecordingState.transcriptionError
     val modelState = ModelDownloader.state
@@ -57,6 +58,24 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             isRecording.collect { recording ->
                 if (!recording) refreshRecordings()
+            }
+        }
+        // A finished final pass rewrote a transcript: reload what shows it.
+        viewModelScope.launch {
+            var previous = emptySet<String>()
+            finalizing.collect { current ->
+                val done = previous - current
+                previous = current
+                if (done.isEmpty()) return@collect
+                refreshRecordings()
+                val open = _playback.value ?: return@collect
+                if (open.recording.wavFile.name in done) {
+                    val transcript = withContext(Dispatchers.IO) {
+                        RecordingRepository.readTranscript(open.recording.wavFile)
+                    }
+                    _playback.value = _playback.value?.takeIf { it.player === open.player }
+                        ?.copy(transcript = transcript)
+                }
             }
         }
         // Load the models already on disk, and again once a download
@@ -92,6 +111,10 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
             _playback.value = Playback(recording, transcript, player)
         }
     }
+
+    /** Re-run the accurate whole-recording transcription; replaces the transcript. */
+    fun transcribeAgain(recording: Recording) =
+        RecordingService.finalize(getApplication(), recording.wavFile)
 
     fun closePlayback() {
         _playback.value?.player?.close()

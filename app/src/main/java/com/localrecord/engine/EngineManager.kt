@@ -25,6 +25,9 @@ object EngineManager {
     @Volatile
     private var speakers: SpeakerEncoder? = null
 
+    @Volatile
+    private var finalEngine: WhisperEngine? = null
+
     /**
      * Load the engine if the model file is present. Returns null when the
      * model hasn't been downloaded yet; throws [WhisperEngineException] if it
@@ -38,6 +41,22 @@ object EngineManager {
         initLogging()
         val config = EngineConfig(useGpu = true, numThreads = 4u, language = "en")
         return WhisperEngine(modelFile.absolutePath, config).also { engine = it }
+    }
+
+    /**
+     * The engine for final whole-recording passes (small.en), loaded on first
+     * use; null when its model isn't downloaded, in which case the live
+     * transcript stands. Throws [WhisperEngineException] if it fails to load.
+     * Blocking.
+     */
+    @Synchronized
+    fun finalEngineOrLoad(context: Context): WhisperEngine? {
+        finalEngine?.let { return it }
+        val modelFile = ModelDownloader.finalModelFile(context)
+        if (!modelFile.exists()) return null
+        initLogging()
+        val config = EngineConfig(useGpu = true, numThreads = 4u, language = "en")
+        return WhisperEngine(modelFile.absolutePath, config).also { finalEngine = it }
     }
 
     /**

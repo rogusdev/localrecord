@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import uniffi.whisper_engine.Segment
+import java.io.File
 
 /**
  * Process-wide bridge between RecordingService and the UI. The service is
@@ -28,6 +29,10 @@ object RecordingState {
     private val _transcriptionActive = MutableStateFlow(false)
     val transcriptionActive: StateFlow<Boolean> = _transcriptionActive.asStateFlow()
 
+    /** Recordings (WAV names) whose final transcription pass is queued or running. */
+    private val _finalizing = MutableStateFlow<Set<String>>(emptySet())
+    val finalizing: StateFlow<Set<String>> = _finalizing.asStateFlow()
+
     /** Why transcription is off although the model is present (load or backend failure). */
     private val _transcriptionError = MutableStateFlow<String?>(null)
     val transcriptionError: StateFlow<String?> = _transcriptionError.asStateFlow()
@@ -49,6 +54,10 @@ object RecordingState {
     internal fun onTranscriptionFailed(error: String) {
         _transcriptionActive.value = false
         _transcriptionError.value = error
+    }
+
+    internal fun onFinalizing(wavFile: File, running: Boolean) {
+        _finalizing.update { if (running) it + wavFile.name else it - wavFile.name }
     }
 
     internal fun setTentative(segments: List<Segment>) {

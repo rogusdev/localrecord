@@ -147,10 +147,19 @@ pub(crate) struct FullParams<'a> {
 
 impl<'a> FullParams<'a> {
     pub(crate) fn greedy(language: &'a CStr) -> Self {
+        Self::with_strategy(sys::whisper_sampling_strategy_WHISPER_SAMPLING_GREEDY, language)
+    }
+
+    pub(crate) fn beam_search(language: &'a CStr, beam_size: c_int) -> Self {
+        let mut params =
+            Self::with_strategy(sys::whisper_sampling_strategy_WHISPER_SAMPLING_BEAM_SEARCH, language);
+        params.raw.beam_search.beam_size = beam_size;
+        params
+    }
+
+    fn with_strategy(strategy: sys::whisper_sampling_strategy, language: &'a CStr) -> Self {
         // SAFETY: plain value constructor.
-        let mut raw = unsafe {
-            sys::whisper_full_default_params(sys::whisper_sampling_strategy_WHISPER_SAMPLING_GREEDY)
-        };
+        let mut raw = unsafe { sys::whisper_full_default_params(strategy) };
         raw.language = language.as_ptr();
         Self {
             raw,

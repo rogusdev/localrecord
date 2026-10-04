@@ -5,6 +5,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Final transcription pass after recording: mediaProcessing on Android 15+,
+         dataSync before that. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- INTERNET is used ONLY for the one-time model download. Transcription
          itself is fully on-device. -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -29,7 +33,7 @@
         <service
             android:name=".audio.RecordingService"
             android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="microphone|mediaProcessing|dataSync" />
 
         <!-- Hands recordings to the share sheet (e.g. Drive's "Save to Drive"). -->
         <provider

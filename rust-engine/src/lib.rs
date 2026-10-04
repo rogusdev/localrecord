@@ -12,6 +12,7 @@ mod engine;
 mod native;
 mod session;
 mod speakers;
+mod wav;
 
 pub use engine::{EngineConfig, Segment, WhisperEngine, WhisperEngineError, Word};
 pub use session::LiveSession;

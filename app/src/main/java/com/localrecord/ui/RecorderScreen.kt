@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -36,7 +37,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -62,6 +65,7 @@ fun RecorderScreen(
     val transcriptionError by viewModel.transcriptionError.collectAsStateWithLifecycle()
     val modelState by viewModel.modelState.collectAsStateWithLifecycle()
     val recordings by viewModel.recordings.collectAsStateWithLifecycle()
+    val finalizing by viewModel.finalizing.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -70,6 +74,18 @@ fun RecorderScreen(
             snackbarHostState.showSnackbar(it, withDismissAction = true, duration = SnackbarDuration.Long)
             viewModel.messageShown()
         }
+    }
+
+    var pendingDelete by remember { mutableStateOf<Recording?>(null) }
+    pendingDelete?.let { recording ->
+        ConfirmDeleteDialog(
+            recording,
+            onConfirm = {
+                viewModel.deleteRecording(recording)
+                pendingDelete = null
+            },
+            onDismiss = { pendingDelete = null },
+        )
     }
 
     Scaffold(
@@ -117,8 +133,9 @@ fun RecorderScreen(
                     items(recordings, key = { it.wavFile.name }) { rec ->
                         RecordingRow(
                             rec,
+                            finalizing = rec.wavFile.name in finalizing,
                             onOpen = { viewModel.openPlayback(rec) },
-                            onDelete = { viewModel.deleteRecording(rec) },
+                            onDelete = { pendingDelete = rec },
                         )
                         HorizontalDivider()
                     }
@@ -129,12 +146,29 @@ fun RecorderScreen(
 }
 
 @Composable
+private fun ConfirmDeleteDialog(recording: Recording, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete recording?") },
+        text = {
+            Text("${recording.name} (${formatElapsed(recording.durationApproxMs)}) and its transcript will be deleted from this phone. Copies you shared elsewhere are not affected.")
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Delete", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
 private fun ModelCard(state: ModelDownloader.State, onDownload: () -> Unit) {
     Card {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             when (state) {
                 is ModelDownloader.State.NotDownloaded -> {
-                    Text("Speech models not downloaded (~${state.megabytes} MB, one time). Recording works without them, but live transcription and speaker labels need them.")
+                    Text("Speech models not downloaded (~${state.megabytes} MB, one time). Recording works without them; live transcription, speaker labels and the accurate final transcript need them.")
                     TextButton(onClick = onDownload) { Text("Download models") }
                 }
                 is ModelDownloader.State.Downloading -> {
@@ -204,7 +238,12 @@ internal fun SpeakerLabel(speaker: UInt?, modifier: Modifier = Modifier) {
 internal fun speakerName(speaker: UInt): String = "Speaker ${speaker + 1u}"
 
 @Composable
-private fun RecordingRow(recording: Recording, onOpen: () -> Unit, onDelete: () -> Unit) {
+private fun RecordingRow(
+    recording: Recording,
+    finalizing: Boolean,
+    onOpen: () -> Unit,
+    onDelete: () -> Unit,
+) {
     val context = LocalContext.current
     Row(
         modifier = Modifier
@@ -216,8 +255,11 @@ private fun RecordingRow(recording: Recording, onOpen: () -> Unit, onDelete: () 
         Column(Modifier.weight(1f)) {
             Text(recording.name, style = MaterialTheme.typography.bodyLarge)
             Text(
-                formatElapsed(recording.durationApproxMs) +
-                    if (recording.transcriptFile != null) " · transcribed" else "",
+                formatElapsed(recording.durationApproxMs) + when {
+                    finalizing -> " · finalizing transcript…"
+                    recording.transcriptFile != null -> " · transcribed"
+                    else -> ""
+                },
                 style = MaterialTheme.typography.bodySmall,
             )
         }

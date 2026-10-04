@@ -95,6 +95,44 @@ impl SpeakerTracker {
     }
 }
 
+/// Labels for a whole recording (`audio` starts at 0 ms): the live matching
+/// pass, then every segment moved to its closest final speaker (early ones
+/// were matched against voices known from only a few seconds), speakers
+/// numbered by first appearance.
+pub(crate) fn label_recording(encoder: &SpeakerEncoder, segments: &mut [Segment], audio: &[f32]) {
+    let mut speakers = Speakers::default();
+    let voiceprints: Vec<Option<Vec<f32>>> = segments
+        .iter()
+        .map(|segment| {
+            let clip = clip(audio, 0, segment.start_ms, segment.end_ms);
+            let voiceprint = (clip.len() as i64 >= MIN_VOICEPRINT_MS * SAMPLES_PER_MS)
+                .then(|| encoder.voiceprint(clip))
+                .flatten()
+                .map(normalized);
+            if let Some(v) = &voiceprint {
+                speakers.assign(v.clone());
+            }
+            voiceprint
+        })
+        .collect();
+    let mut numbers: Vec<Option<u32>> = vec![None; speakers.sums.len()];
+    let mut next = 0;
+    let mut last = None;
+    for (segment, voiceprint) in segments.iter_mut().zip(voiceprints) {
+        let speaker = voiceprint
+            .and_then(|v| speakers.nearest(&v))
+            .map(|i| {
+                *numbers[i].get_or_insert_with(|| {
+                    next += 1;
+                    next - 1
+                })
+            })
+            .or(last);
+        segment.speaker = speaker;
+        last = speaker;
+    }
+}
+
 /// The part of `audio` (starting at `audio_start_ms`) between two recording times.
 fn clip(audio: &[f32], audio_start_ms: i64, start_ms: i64, end_ms: i64) -> &[f32] {
     let index = |ms: i64| {
@@ -135,6 +173,18 @@ impl Speakers {
             }
         };
         u32::try_from(index).unwrap_or(u32::MAX)
+    }
+}
+
+impl Speakers {
+    /// Index of the most similar speaker to a unit-length voiceprint.
+    fn nearest(&self, voiceprint: &[f32]) -> Option<usize> {
+        self.sums
+            .iter()
+            .map(|sum| dot(&normalized(sum.clone()), voiceprint))
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
     }
 }
 

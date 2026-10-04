@@ -12,12 +12,17 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
 - **UI/Android layer** (`app/`): Kotlin, single-activity, Jetpack Compose
   - `RecordingService`: foreground service; one capture thread does
     AudioRecord (16 kHz mono PCM16) → WAV file + Rust session, drains
-    segments, flushes and writes the transcript on stop: a readable `.txt`
-    plus a `.json` with segment/word timings (`RecordingRepository`)
+    segments, flushes and writes the live transcript on stop as a draft: a
+    readable `.txt` plus a `.json` with segment/word/speaker timings
+    (`RecordingRepository`). Then a single-thread queue runs the final pass
+    (`transcribe_wav` with small.en) and overwrites the draft; the service
+    stays foreground (mediaProcessing, dataSync before Android 15) until the
+    queue drains. Playback's "Transcribe again" queues the same pass
   - `RecordingState`: process-wide StateFlows the UI collects (service is
     the only writer)
-  - `EngineManager`: owns the single loaded model; preloaded by the
-    ViewModel once the model is on disk
+  - `EngineManager`: owns the loaded models: live engine (base.en) and
+    speaker model, preloaded by the ViewModel; final engine (small.en)
+    loaded on the first final pass
   - `Player` + `PlaybackScreen`: MediaPlayer playback; highlights the word
     at the play position from the `.json` timings (whole segments for older
     `.txt`-only recordings); tap a word or timestamp to seek
@@ -33,6 +38,12 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
     rest of the process; recording continues and the UI shows the error
   - Adreno 840: ggml's fp16 Vulkan shaders hit `ErrorDeviceLost`, so the
     engine sets `GGML_VK_DISABLE_F16` before the first model load
+  - `transcribe_wav` (final pass): reads the WAV in Rust (`src/wav.rs`),
+    one `whisper_full` over the whole recording with beam search (5) and
+    no text carried between whisper's 30 s windows (carrying it set off a
+    repetition loop on the phone), drops word-for-word repeated segments
+    (loop safety net), then `speakers::label_recording` (live-style
+    matching, then each segment moved to its nearest final speaker)
   - `src/speakers.rs`: live speaker labels. Each committed segment's audio
     gets a voiceprint (sherpa-onnx, 3D-Speaker CAM++ "zh_en common advanced")
     matched to the session's speakers
@@ -50,9 +61,14 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   one's end, the rest is re-transcribed next pass. Zero-length segments are
   whisper's (often hallucinated) guess at trailing audio and are never
   committed. Forced commit at `MAX_WINDOW_MS` (20 s). Audio is only
-  discarded after its text is emitted or a pass found no speech.
-- **Models**: `ggml-base.en-q5_1.bin` (~60 MB) and the 3D-Speaker CAM++
-  "advanced" voiceprint model (~28 MB, Apache-2.0), downloaded once from Hugging Face
+  discarded after its text is emitted or a pass found no speech. Each pass
+  gets the last ~200 characters of committed text as its prompt (AMI
+  excerpts: 34.6% → 28.4% WER); the held-back segments are exposed as
+  `tentative` and shown grey. The engine runs one warm-up pass at load so
+  Vulkan pipeline compilation (~2 s) doesn't delay the first live pass
+- **Models**: `ggml-base.en-q5_1.bin` (~60 MB, live), `ggml-small.en-q5_1.bin`
+  (~190 MB, final pass) and the 3D-Speaker CAM++ "advanced" voiceprint
+  model (~28 MB, Apache-2.0), downloaded once from Hugging Face
   (URLs pinned to a revision, SHA-256 verified) into app-private storage.
   No other network use.
 
@@ -96,6 +112,11 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
 
 ## Open questions / decisions pending
 
+- Final-pass model choice (AMI excerpts, WER, beam 5, host CPU): base.en
+  30.5%, small.en 24.0%, medium.en 25.7%, large-v3-turbo 23.9% at ~7x
+  small's time; beam 1 was far worse (~42%). On the phone (GPU fp32)
+  small.en scores ~26% and takes ~0.2x real time (~11 min per hour of
+  audio); the phone CPU was far slower than its GPU
 - Tune `STEP_MS` / `HOLDBACK_MS` / `MAX_WINDOW_MS` once we have real device
   latency numbers; consider whisper `audio_ctx` (encoder always runs a
   padded 30 s window otherwise) and whisper.cpp's VAD (needs a VAD model)
