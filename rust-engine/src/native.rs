@@ -6,7 +6,10 @@
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
 use std::marker::PhantomData;
+use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
@@ -14,6 +17,16 @@ use whisper_rs_sys as sys;
 
 /// Buffer for a caught exception's message, NUL included.
 const EXCEPTION_MSG_CAP: usize = 512;
+/// A ggml whisper model file starts with this magic ("ggml"), then its
+/// hparams as little-endian i32s: n_vocab, n_audio_ctx, n_audio_state,
+/// n_audio_head, n_audio_layer, n_text_ctx, n_text_state, n_text_head,
+/// n_text_layer, n_mels, ftype.
+const GGML_MAGIC: u32 = 0x6767_6d6c;
+const MODEL_HEADER_LEN: usize = 4 + 11 * 4;
+/// Vocabulary size of the English-only models; multilingual ones are larger.
+const N_VOCAB_ENGLISH: i32 = 51_864;
+/// large-v3 (and turbo) take 128 mel bins; earlier models 80.
+const N_MELS_LARGE_V3: i32 = 128;
 
 extern "C" {
     /// src/catch.cpp: calls `f(data)`; on a C++ exception writes its message
@@ -114,13 +127,25 @@ unsafe impl Send for Context {}
 unsafe impl Sync for Context {}
 
 impl Context {
-    pub(crate) fn load(path: &str, use_gpu: bool, flash_attn: bool) -> Result<Self, NativeError> {
+    /// With `aligned_words`, token times come from DTW over the model's
+    /// alignment heads (`TokenData::t_dtw`); whisper.cpp can't do that with
+    /// flash attention, so it is turned off.
+    pub(crate) fn load(
+        path: &str,
+        use_gpu: bool,
+        flash_attn: bool,
+        aligned_words: bool,
+    ) -> Result<Self, NativeError> {
         let c_path = CString::new(path)
             .map_err(|_| NativeError::Failed("model path contains a NUL byte".to_string()))?;
         // SAFETY: plain value constructor.
         let mut params = unsafe { sys::whisper_context_default_params() };
         params.use_gpu = use_gpu;
-        params.flash_attn = flash_attn;
+        params.flash_attn = flash_attn && !aligned_words;
+        if aligned_words {
+            params.dtw_token_timestamps = true;
+            params.dtw_aheads_preset = alignment_heads(Path::new(path))?;
+        }
         // SAFETY: `c_path` is a valid C string for the duration of the call.
         let ptr = catch_exceptions(|| unsafe {
             whisper_init_from_file_with_params_no_state(c_path.as_ptr(), params)
@@ -140,6 +165,52 @@ impl Drop for Context {
             log::error!("leaking whisper context: {e}");
         }
     }
+}
+
+/// whisper.cpp's alignment-head preset for the model at `path`, identified
+/// by its layer counts and vocabulary.
+fn alignment_heads(path: &Path) -> Result<sys::whisper_alignment_heads_preset, NativeError> {
+    let mut header = [0u8; MODEL_HEADER_LEN];
+    File::open(path)
+        .and_then(|mut f| f.read_exact(&mut header))
+        .map_err(|e| NativeError::Failed(format!("can't read model header: {e}")))?;
+    let word = |i: usize| {
+        [
+            header[i * 4],
+            header[i * 4 + 1],
+            header[i * 4 + 2],
+            header[i * 4 + 3],
+        ]
+    };
+    if u32::from_le_bytes(word(0)) != GGML_MAGIC {
+        return Err(NativeError::Failed("not a ggml whisper model".to_string()));
+    }
+    let hparam = |i: usize| i32::from_le_bytes(word(i + 1));
+    let (n_vocab, n_audio_layer, n_text_layer, n_mels) =
+        (hparam(0), hparam(4), hparam(8), hparam(9));
+    let english = n_vocab == N_VOCAB_ENGLISH;
+    let preset = match (n_audio_layer, n_text_layer, english) {
+        (4, 4, true) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_TINY_EN,
+        (4, 4, false) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_TINY,
+        (6, 6, true) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_BASE_EN,
+        (6, 6, false) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_BASE,
+        (12, 12, true) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_SMALL_EN,
+        (12, 12, false) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_SMALL,
+        (24, 24, true) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_MEDIUM_EN,
+        (24, 24, false) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_MEDIUM,
+        (32, 4, false) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_LARGE_V3_TURBO,
+        // large v1 and v2 have the same shape; v2 is the one in use
+        (32, 32, false) if n_mels == N_MELS_LARGE_V3 => {
+            sys::whisper_alignment_heads_preset_WHISPER_AHEADS_LARGE_V3
+        }
+        (32, 32, false) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_LARGE_V2,
+        _ => {
+            return Err(NativeError::Failed(format!(
+                "no alignment heads known for a model with {n_audio_layer}/{n_text_layer} layers"
+            )))
+        }
+    };
+    Ok(preset)
 }
 
 /// Inference parameters; borrows the language string they point at.
@@ -193,7 +264,8 @@ pub(crate) struct RawSegment {
     pub t0: i64,
     pub t1: i64,
     pub text: String,
-    /// Empty unless the params enabled `token_timestamps`.
+    /// Empty unless the params enabled `token_timestamps` or the context
+    /// was loaded with `aligned_words`.
     pub words: Vec<RawWord>,
 }
 
@@ -254,16 +326,35 @@ impl State {
         let eot = unsafe { sys::whisper_token_eot(ctx) };
         (0..n)
             .map(|i| unsafe {
+                let t0 = sys::whisper_full_get_segment_t0_from_state(state, i);
                 let n_tokens = sys::whisper_full_n_tokens_from_state(state, i);
+                // DTW times (-1 without DTW) are where the alignment moves on
+                // to the next token, i.e. token ends; a token starts where the
+                // one before it ended. Punctuation's DTW times are noise (often
+                // past the pause after it), so it takes no time.
+                let mut prev_dtw_end = t0;
                 // ids from EOT up are special ([_BEG_], timestamps, ...), not text
-                let tokens = (0..n_tokens).filter_map(|j| {
+                let tokens = (0..n_tokens).filter_map(move |j| {
                     let data = sys::whisper_full_get_token_data_from_state(state, i, j);
                     let text = sys::whisper_full_get_token_text_from_state(ctx, state, i, j);
-                    (data.id < eot && !text.is_null())
-                        .then(|| (data.t0, data.t1, CStr::from_ptr(text).to_bytes()))
+                    if data.id >= eot || text.is_null() {
+                        return None;
+                    }
+                    let text = CStr::from_ptr(text).to_bytes();
+                    let (start, end) = if data.t_dtw >= 0 {
+                        if text.iter().any(u8::is_ascii_alphanumeric) || !text.is_ascii() {
+                            let start = std::mem::replace(&mut prev_dtw_end, data.t_dtw);
+                            (start, data.t_dtw)
+                        } else {
+                            (prev_dtw_end, prev_dtw_end)
+                        }
+                    } else {
+                        (data.t0, data.t1)
+                    };
+                    Some((start, end, text))
                 });
                 RawSegment {
-                    t0: sys::whisper_full_get_segment_t0_from_state(state, i),
+                    t0,
                     t1: sys::whisper_full_get_segment_t1_from_state(state, i),
                     text: c_str_lossy(sys::whisper_full_get_segment_text_from_state(state, i)),
                     words: group_words(tokens),
@@ -283,7 +374,7 @@ fn group_words<'a>(tokens: impl Iterator<Item = (i64, i64, &'a [u8])>) -> Vec<Ra
     for (t0, t1, text) in tokens {
         match current.as_mut() {
             Some((_, end, bytes)) if text.first() != Some(&b' ') => {
-                *end = t1;
+                *end = (*end).max(t1);
                 bytes.extend_from_slice(text);
             }
             _ => {

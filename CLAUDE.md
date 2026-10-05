@@ -25,9 +25,11 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   - `EngineManager`: owns the loaded models: live engine (base.en) and
     speaker model, preloaded by the ViewModel; final engine (small.en)
     loaded on the first final pass
-  - `Player` + `PlaybackScreen`: MediaPlayer playback; highlights the word
-    at the play position from the `.vtt` word timestamps; tap a word or
-    timestamp to seek
+  - `Player` + `PlaybackScreen`: AudioTrack playback of the WAV, position
+    from `AudioTrack.getTimestamp` (the frame at the speaker; MediaPlayer's
+    position ran ~0.5 s ahead of the sound on the OnePlus 15); highlights
+    the word at the play position from the `.vtt` word timestamps; tap a
+    word or timestamp to seek
   - Sharing: `shareRecording` sends the `.wav` and `.vtt` through a
     FileProvider to the share sheet. No Drive API/OAuth on purpose: that
     needs a Google Cloud project
@@ -50,6 +52,12 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
     repetition loop on the phone), drops word-for-word repeated segments
     (loop safety net), then `speakers::label_recording` (live-style
     matching, then each segment moved to its nearest final speaker)
+  - Word times: the final engine sets `aligned_words` → whisper.cpp DTW
+    over the model's alignment heads (preset picked from the model file
+    header; flash attention off, which DTW requires). `t_dtw` marks a
+    token's end; a word starts at the previous word's end, moved past any
+    pause by `src/onsets.rs` (audio energy). Live keeps whisper's rough
+    token timestamps (the draft is overwritten by the final pass)
   - `src/vtt.rs`: the transcript file format: `transcript_to_vtt` /
     `transcript_from_vtt` (exported to Kotlin)
   - `src/speakers.rs`: live speaker labels. Each committed segment's audio

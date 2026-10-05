@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::native::{Context, FullParams, NativeError, State};
+use crate::onsets;
 use crate::session::{LiveSession, MIN_AUDIO_SAMPLES};
 use crate::speakers::{self, SpeakerEncoder};
 use crate::wav;
@@ -57,6 +58,11 @@ pub struct EngineConfig {
     /// ISO 639-1 language hint; "en" for the *.en models.
     #[uniffi(default = "en")]
     pub language: String,
+    /// Word times from DTW over the model's alignment heads, word starts
+    /// refined from the audio, instead of whisper's token-probability guess.
+    /// Accurate enough for playback highlighting; turns off flash attention.
+    #[uniffi(default = false)]
+    pub aligned_words: bool,
 }
 
 /// One transcribed span. Times are relative to the start of the
@@ -66,8 +72,8 @@ pub struct Segment {
     pub start_ms: i64,
     pub end_ms: i64,
     pub text: String,
-    /// Word timings from whisper's token timestamps: approximate (whisper.cpp
-    /// estimates them from token probabilities), within the segment's span.
+    /// Word timings within the segment's span: from DTW alignment with
+    /// `EngineConfig::aligned_words`, else whisper's rough token timestamps.
     pub words: Vec<Word>,
     /// 0-based speaker within the session; None without a speaker model.
     pub speaker: Option<u32>,
@@ -105,11 +111,18 @@ impl WhisperEngine {
             CString::new(config.language.as_str()).map_err(|_| WhisperEngineError::ModelLoad {
                 msg: "language contains a NUL byte".to_string(),
             })?;
-        let ctx = Context::load(&model_path, config.use_gpu, FLASH_ATTN)
-            .map_err(|e| WhisperEngineError::ModelLoad { msg: e.to_string() })?;
+        let ctx = Context::load(
+            &model_path,
+            config.use_gpu,
+            FLASH_ATTN,
+            config.aligned_words,
+        )
+        .map_err(|e| WhisperEngineError::ModelLoad { msg: e.to_string() })?;
         log::info!(
-            "model loaded from {model_path} (use_gpu={}, flash_attn={FLASH_ATTN})",
-            config.use_gpu
+            "model loaded from {model_path} (use_gpu={}, flash_attn={}, aligned_words={})",
+            config.use_gpu,
+            FLASH_ATTN && !config.aligned_words,
+            config.aligned_words
         );
         let engine = Arc::new(Self {
             ctx: Arc::new(ctx),
@@ -276,7 +289,7 @@ impl WhisperEngine {
 
         state.full(&params, samples).map_err(|e| self.record(e))?;
 
-        let segments = state
+        let mut segments: Vec<Segment> = state
             .segments()
             .into_iter()
             .filter_map(|s| {
@@ -304,6 +317,9 @@ impl WhisperEngine {
                 })
             })
             .collect();
+        if self.config.aligned_words {
+            onsets::refine_word_starts(&mut segments, samples, base_ms);
+        }
         Ok(segments)
     }
 

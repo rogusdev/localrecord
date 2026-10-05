@@ -10,6 +10,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 mod engine;
 mod native;
+mod onsets;
 mod session;
 mod speakers;
 mod vtt;

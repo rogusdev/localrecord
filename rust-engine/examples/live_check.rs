@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         use_gpu: false,
         num_threads: 4,
         language: "en".to_string(),
+        aligned_words: false,
     };
     let engine = WhisperEngine::new(model, config)?;
 
