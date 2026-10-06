@@ -16,12 +16,16 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
+import android.os.Process
 import android.os.SystemClock
 import android.util.Log
+import android.widget.Toast
 import com.localrecord.MainActivity
 import com.localrecord.R
 import com.localrecord.data.RecordingRepository
 import com.localrecord.engine.EngineManager
+import com.localrecord.model.ModelDownloader
 import uniffi.whisper_engine.LiveSession
 import uniffi.whisper_engine.Segment
 import uniffi.whisper_engine.WhisperEngineException
@@ -39,9 +43,9 @@ import kotlin.concurrent.thread
  * Capture format is 16 kHz mono PCM16: exactly what Whisper consumes, so no
  * resampling and one shared buffer for both the file and the engine.
  *
- * After a recording stops, its live transcript is saved as a draft and a
- * final whole-recording pass (more accurate) is queued; it replaces the draft
- * when done. [finalize] queues the same pass for an existing recording. The
+ * After a recording stops, its live transcript is saved as a draft. The
+ * whole-recording pass (more accurate, but heavy on the GPU/CPU) runs only on
+ * request: [finalize] queues it, and it replaces the draft when done. The
  * service stays in the foreground until capture and the queue are both done.
  */
 class RecordingService : Service() {
@@ -60,6 +64,12 @@ class RecordingService : Service() {
         private const val READ_BUFFER_BYTES = SAMPLE_RATE_HZ / 10 * 2
         /** Pull newly stable segments every 5 reads (500 ms). */
         private const val DRAIN_EVERY_READS = 5
+        /** Shown when a recording stops; the final pass is started by hand. */
+        private const val REFINE_HINT =
+            "Recording saved. To refine its transcript, open it and tap Refine (↻). " +
+                "That uses a lot of the phone's processing while it runs."
+        /** Upper bound on one final pass holding the CPU awake (6 h). */
+        private const val FINAL_PASS_WAKE_LOCK_MS = 6 * 60 * 60 * 1000L
 
         fun start(context: Context) {
             context.startForegroundService(
@@ -96,8 +106,17 @@ class RecordingService : Service() {
     /** Alive from start until the file and live transcript are saved. Main thread only. */
     private var captureThread: Thread? = null
 
-    /** Final passes run one at a time, off the capture thread. */
-    private val finalizer: ExecutorService = Executors.newSingleThreadExecutor()
+    /**
+     * Final passes run one at a time, off the capture thread, at background
+     * priority (nice 10) so the phone stays usable; whisper.cpp's worker
+     * threads inherit it.
+     */
+    private val finalizer: ExecutorService = Executors.newSingleThreadExecutor { task ->
+        Thread({
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+            task.run()
+        }, "final-pass")
+    }
     /** Queued or running final passes. Main thread only. */
     private var pendingFinals = 0
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -108,7 +127,7 @@ class RecordingService : Service() {
         val active = captureThread?.isAlive == true
         when (intent?.action) {
             ACTION_START -> if (!active) startRecording()
-            // The capture thread saves the recording, then queues its final pass.
+            // The capture thread saves the recording and the live draft.
             ACTION_STOP -> if (active) capturing = false else stopIfIdle()
             ACTION_FINALIZE -> {
                 val path = intent.getStringExtra(EXTRA_WAV_PATH)
@@ -164,7 +183,10 @@ class RecordingService : Service() {
         mainHandler.post {
             // A new recording may already have started its own capture thread.
             if (captureThread === thisThread) captureThread = null
-            if (session != null) enqueueFinal(wavFile) else stopIfIdle()
+            if (ModelDownloader.finalModelFile(this).exists()) {
+                Toast.makeText(this, REFINE_HINT, Toast.LENGTH_LONG).show()
+            }
+            stopIfIdle()
         }
     }
 
@@ -174,7 +196,16 @@ class RecordingService : Service() {
         RecordingState.onFinalizing(wavFile, true)
         updateForeground()
         finalizer.execute {
-            finalizeTranscript(wavFile)
+            // A foreground service doesn't keep the CPU awake; without this
+            // the pass stalls whenever the screen is off.
+            val wakeLock = getSystemService(PowerManager::class.java)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "localrecord:final-pass")
+            wakeLock.acquire(FINAL_PASS_WAKE_LOCK_MS)
+            try {
+                finalizeTranscript(wavFile)
+            } finally {
+                if (wakeLock.isHeld) wakeLock.release()
+            }
             mainHandler.post {
                 pendingFinals--
                 RecordingState.onFinalizing(wavFile, false)

@@ -9,6 +9,8 @@
          dataSync before that. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Keeps the CPU awake during the final pass with the screen off. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- INTERNET is used ONLY for the one-time model download. Transcription
          itself is fully on-device. -->
     <uses-permission android:name="android.permission.INTERNET" />

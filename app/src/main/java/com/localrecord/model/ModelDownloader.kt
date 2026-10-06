@@ -16,7 +16,7 @@ import java.security.MessageDigest
 
 /**
  * One-time download of the model files: Whisper base.en for live
- * transcription, Whisper small.en for the final pass after recording, and a
+ * transcription, Whisper small.en for the on-demand final pass, and a
  * speaker-embedding model for speaker labels. After this completes the app
  * never needs the network again.
  */

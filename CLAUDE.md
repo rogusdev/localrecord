@@ -16,10 +16,12 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
     WebVTT `.vtt`: a cue per segment, speaker as `<v Speaker n>`, an inline
     start timestamp before every word; playback reads it back
     (`RecordingRepository` does the file IO, Rust's `vtt.rs` the format).
-    Then a single-thread queue runs the final pass (`transcribe_wav` with
-    small.en) and overwrites the draft; the service
-    stays foreground (mediaProcessing, dataSync before Android 15) until the
-    queue drains. Playback's "Transcribe again" queues the same pass
+    On stop a toast points to playback's "Refine transcript" button, which
+    queues the final pass (`transcribe_wav` with small.en) on a
+    single-thread, background-priority queue holding a partial wakelock; it
+    overwrites the draft. Not automatic: it loads the phone heavily (~an
+    hour of audio ≈ 11+ min of GPU). The service stays foreground
+    (mediaProcessing, dataSync before Android 15) until the queue drains
   - `RecordingState`: process-wide StateFlows the UI collects (service is
     the only writer)
   - `EngineManager`: owns the loaded models: live engine (base.en) and

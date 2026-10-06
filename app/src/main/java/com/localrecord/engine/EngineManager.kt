@@ -55,8 +55,9 @@ object EngineManager {
         val modelFile = ModelDownloader.finalModelFile(context)
         if (!modelFile.exists()) return null
         initLogging()
-        // Aligned word times drive playback highlighting.
-        val config = EngineConfig(useGpu = true, numThreads = 4u, language = "en", alignedWords = true)
+        // Aligned word times drive playback highlighting. 2 CPU threads: the
+        // pass runs in the background while the phone is in use.
+        val config = EngineConfig(useGpu = true, numThreads = 2u, language = "en", alignedWords = true)
         return WhisperEngine(modelFile.absolutePath, config).also { finalEngine = it }
     }
 

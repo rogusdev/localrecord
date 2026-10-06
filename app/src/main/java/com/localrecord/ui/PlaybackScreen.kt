@@ -65,7 +65,7 @@ private class SegmentText(val text: String, val wordRanges: List<IntRange>)
 fun PlaybackScreen(
     playback: Playback,
     finalizing: Boolean,
-    /** Why the last "Transcribe again" (or post-recording pass) failed. */
+    /** Why the last "Refine transcript" pass failed. */
     finalizeError: String?,
     onTranscribeAgain: () -> Unit,
     onBack: () -> Unit,
@@ -90,7 +90,7 @@ fun PlaybackScreen(
                         CircularProgressIndicator(Modifier.padding(12.dp).size(24.dp), strokeWidth = 2.dp)
                     } else {
                         IconButton(onClick = onTranscribeAgain) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Transcribe again")
+                            Icon(Icons.Default.Refresh, contentDescription = "Refine transcript")
                         }
                     }
                     IconButton(onClick = { shareRecording(context, playback.recording) }) {
