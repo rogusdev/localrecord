@@ -16,6 +16,8 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
     WebVTT `.vtt`: a cue per segment, speaker as `<v Speaker n>`, an inline
     start timestamp before every word; playback reads it back
     (`RecordingRepository` does the file IO, Rust's `vtt.rs` the format).
+    The record button pauses; paused offers resume or stop. Pause stops
+    AudioRecord (mic off); resume appends to the same WAV and live session.
     On stop a toast points to playback's "Refine transcript" button, which
     queues the final pass (`transcribe_wav` with small.en) on a
     single-thread, background-priority queue holding a partial wakelock; it

@@ -7,6 +7,7 @@ import uniffi.whisper_engine.WhisperEngineException
 import uniffi.whisper_engine.transcriptFromVtt
 import uniffi.whisper_engine.transcriptToVtt
 import java.io.File
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -29,6 +30,8 @@ object RecordingRepository {
     private const val TAG = "RecordingRepository"
     private const val WAV_HEADER_BYTES = 44L
     private const val BYTES_PER_MS = 32L // 16 kHz mono s16
+    /** ext4 limits a file name to 255 bytes; leaves room for ".wav"/".vtt". */
+    private const val MAX_NAME_BYTES = 250
 
     fun recordingsDir(context: Context): File {
         val dir = context.getExternalFilesDir("recordings")
@@ -50,7 +53,8 @@ object RecordingRepository {
         recordingsDir(context)
             .listFiles { f -> f.extension == "wav" }
             .orEmpty()
-            .sortedByDescending { it.name }
+            // By modification time, not name, so renamed recordings keep their place.
+            .sortedByDescending { it.lastModified() }
             .map { wav ->
                 Recording(
                     wavFile = wav,
@@ -76,6 +80,36 @@ object RecordingRepository {
             Log.w(TAG, "unreadable ${vtt.name}", e)
             null
         }
+    }
+
+    /**
+     * Renames the .wav and its .vtt to [newName] (no extension). Returns the
+     * renamed recording, or throws [IOException] with a message for the user.
+     * Blocking file IO.
+     */
+    fun rename(recording: Recording, newName: String): Recording {
+        val name = newName.trim()
+        when {
+            name.isEmpty() -> throw IOException("the name is empty")
+            name.startsWith(".") -> throw IOException("the name can't start with a dot")
+            name.any { it == '/' || it == '\u0000' } -> throw IOException("the name can't contain /")
+            name.toByteArray().size > MAX_NAME_BYTES -> throw IOException("the name is too long")
+        }
+        val wav = recording.wavFile
+        if (name == wav.nameWithoutExtension) return recording
+        val newWav = File(wav.parentFile, "$name.wav")
+        val oldVtt = transcriptFileFor(wav)
+        val newVtt = transcriptFileFor(newWav)
+        if (newWav.exists() || newVtt.exists()) throw IOException("a recording named $name is already here")
+        if (!wav.renameTo(newWav)) throw IOException("can't rename ${wav.name}")
+        if (oldVtt.exists() && !oldVtt.renameTo(newVtt)) {
+            newWav.renameTo(wav)
+            throw IOException("can't rename ${oldVtt.name}")
+        }
+        return recording.copy(
+            wavFile = newWav,
+            transcriptFile = newVtt.takeIf { it.exists() },
+        )
     }
 
     /** Deletes the .wav and its .vtt, including one written since [list] ran. */

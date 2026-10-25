@@ -37,6 +37,7 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     val isRecording = RecordingState.isRecording
+    val isPaused = RecordingState.isPaused
     val elapsedMs = RecordingState.elapsedMs
     val liveSegments = RecordingState.liveSegments
     val tentativeSegments = RecordingState.tentativeSegments
@@ -95,6 +96,10 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun startRecording() = RecordingService.start(getApplication())
+
+    fun pauseRecording() = RecordingService.pause(getApplication())
+
+    fun resumeRecording() = RecordingService.resume(getApplication())
 
     fun stopRecording() = RecordingService.stop(getApplication())
 
@@ -156,6 +161,22 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteRecording(recording: Recording) {
         viewModelScope.launch(Dispatchers.IO) {
             RecordingRepository.delete(recording)
+            refreshRecordings()
+        }
+    }
+
+    /** Renames a recording and its transcript; not while its final pass is queued or running. */
+    fun renameRecording(recording: Recording, newName: String) {
+        if (recording.wavFile.name in finalizing.value) {
+            _message.value = "Can't rename ${recording.name} while its transcript is being refined."
+            return
+        }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { RecordingRepository.rename(recording, newName) }
+            } catch (e: IOException) {
+                _message.value = "Can't rename ${recording.name}: ${e.message}"
+            }
             refreshRecordings()
         }
     }

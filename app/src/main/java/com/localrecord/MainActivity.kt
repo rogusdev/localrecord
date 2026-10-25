@@ -59,10 +59,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onRecordClick() {
-        if (viewModel.isRecording.value) {
-            viewModel.stopRecording()
-            return
-        }
         val needed = buildList {
             add(Manifest.permission.RECORD_AUDIO)
             add(Manifest.permission.POST_NOTIFICATIONS)

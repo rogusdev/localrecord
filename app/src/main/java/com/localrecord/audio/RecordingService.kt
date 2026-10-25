@@ -18,7 +18,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
-import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
 import com.localrecord.MainActivity
@@ -33,7 +32,10 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.thread
+import kotlin.concurrent.withLock
 
 /**
  * Foreground service that captures mic audio, writes it to a WAV file, and
@@ -42,6 +44,9 @@ import kotlin.concurrent.thread
  *
  * Capture format is 16 kHz mono PCM16: exactly what Whisper consumes, so no
  * resampling and one shared buffer for both the file and the engine.
+ *
+ * Pausing releases the mic; the audio on either side of a pause is joined in
+ * one WAV and one live session, so transcript times match the file.
  *
  * After a recording stops, its live transcript is saved as a draft. The
  * whole-recording pass (more accurate, but heavy on the GPU/CPU) runs only on
@@ -53,6 +58,8 @@ class RecordingService : Service() {
     companion object {
         const val ACTION_START = "com.localrecord.action.START_RECORDING"
         const val ACTION_STOP = "com.localrecord.action.STOP_RECORDING"
+        const val ACTION_PAUSE = "com.localrecord.action.PAUSE_RECORDING"
+        const val ACTION_RESUME = "com.localrecord.action.RESUME_RECORDING"
         const val ACTION_FINALIZE = "com.localrecord.action.FINALIZE_TRANSCRIPT"
         private const val EXTRA_WAV_PATH = "wav_path"
 
@@ -64,6 +71,10 @@ class RecordingService : Service() {
         private const val READ_BUFFER_BYTES = SAMPLE_RATE_HZ / 10 * 2
         /** Pull newly stable segments every 5 reads (500 ms). */
         private const val DRAIN_EVERY_READS = 5
+        /** How often a paused capture thread still pulls segments a running pass commits. */
+        private const val PAUSED_DRAIN_MS = 500L
+        /** 16 kHz mono s16. */
+        private const val BYTES_PER_SECOND = SAMPLE_RATE_HZ * 2
         /** Shown when a recording stops; the final pass is started by hand. */
         private const val REFINE_HINT =
             "Recording saved. To refine its transcript, open it and tap Refine (↻). " +
@@ -77,10 +88,14 @@ class RecordingService : Service() {
             )
         }
 
-        fun stop(context: Context) {
-            context.startService(
-                Intent(context, RecordingService::class.java).setAction(ACTION_STOP)
-            )
+        fun stop(context: Context) = send(context, ACTION_STOP)
+
+        fun pause(context: Context) = send(context, ACTION_PAUSE)
+
+        fun resume(context: Context) = send(context, ACTION_RESUME)
+
+        private fun send(context: Context, action: String) {
+            context.startService(Intent(context, RecordingService::class.java).setAction(action))
         }
 
         /** Queue a final transcription pass for an existing recording. */
@@ -103,6 +118,11 @@ class RecordingService : Service() {
 
     @Volatile
     private var capturing = false
+    @Volatile
+    private var paused = false
+    /** Held while [capturing] or [paused] change, so a paused capture thread wakes at once. */
+    private val captureLock = ReentrantLock()
+    private val captureChanged = captureLock.newCondition()
     /** Alive from start until the file and live transcript are saved. Main thread only. */
     private var captureThread: Thread? = null
 
@@ -128,7 +148,13 @@ class RecordingService : Service() {
         when (intent?.action) {
             ACTION_START -> if (!active) startRecording()
             // The capture thread saves the recording and the live draft.
-            ACTION_STOP -> if (active) capturing = false else stopIfIdle()
+            ACTION_STOP -> if (active) signalCapture { capturing = false } else stopIfIdle()
+            ACTION_PAUSE, ACTION_RESUME -> if (active && capturing) {
+                signalCapture { paused = intent.action == ACTION_PAUSE }
+                updateForeground()
+            } else {
+                stopIfIdle()
+            }
             ACTION_FINALIZE -> {
                 val path = intent.getStringExtra(EXTRA_WAV_PATH)
                 if (path != null) enqueueFinal(File(path)) else stopIfIdle()
@@ -139,6 +165,7 @@ class RecordingService : Service() {
 
     private fun startRecording() {
         capturing = true
+        paused = false
         updateForeground()
         val wavFile = RecordingRepository.newRecordingFile(this)
         // Model load (first use) and transcription flush block; keep them off
@@ -248,6 +275,12 @@ class RecordingService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification(recording), types)
     }
 
+    /** Changes [capturing] / [paused] and wakes a paused capture thread to act on it. */
+    private fun signalCapture(change: () -> Unit) = captureLock.withLock {
+        change()
+        captureChanged.signalAll()
+    }
+
     /** Main thread. */
     private fun stopIfIdle() {
         if (captureThread?.isAlive != true && !capturing && pendingFinals == 0) {
@@ -277,13 +310,32 @@ class RecordingService : Service() {
             recorder.release()
             return
         }
-        val startedAt = SystemClock.elapsedRealtime()
+        val drain = { live: LiveSession ->
+            publish(live.drainSegments())
+            RecordingState.setTentative(live.tentative())
+            live.failure()?.let(RecordingState::onTranscriptionFailed)
+        }
         try {
             WavWriter(wavFile, SAMPLE_RATE_HZ).use { wav ->
-                recorder.startRecording()
                 val buffer = ByteArray(READ_BUFFER_BYTES)
                 var reads = 0
+                var recordedBytes = 0L
                 while (capturing) {
+                    if (paused) {
+                        if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) recorder.stop()
+                        RecordingState.onPaused(true)
+                        captureLock.withLock {
+                            if (paused && capturing) {
+                                captureChanged.await(PAUSED_DRAIN_MS, TimeUnit.MILLISECONDS)
+                            }
+                        }
+                        session?.let(drain)
+                        continue
+                    }
+                    if (recorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                        recorder.startRecording()
+                        RecordingState.onPaused(false)
+                    }
                     val read = recorder.read(buffer, 0, buffer.size)
                     if (read < 0) {
                         // Error codes (e.g. ERROR_DEAD_OBJECT) don't recover.
@@ -293,12 +345,10 @@ class RecordingService : Service() {
                     if (read == 0) continue
                     wav.write(buffer, read)
                     session?.feedPcm16(if (read == buffer.size) buffer else buffer.copyOf(read))
-                    RecordingState.onElapsed(SystemClock.elapsedRealtime() - startedAt)
-                    if (session != null && ++reads % DRAIN_EVERY_READS == 0) {
-                        publish(session.drainSegments())
-                        RecordingState.setTentative(session.tentative())
-                        session.failure()?.let(RecordingState::onTranscriptionFailed)
-                    }
+                    // Audio time, so pauses don't count.
+                    recordedBytes += read
+                    RecordingState.onElapsed(recordedBytes * 1000 / BYTES_PER_SECOND)
+                    if (session != null && ++reads % DRAIN_EVERY_READS == 0) drain(session)
                 }
             }
         } finally {
@@ -308,7 +358,7 @@ class RecordingService : Service() {
     }
 
     override fun onDestroy() {
-        capturing = false
+        signalCapture { capturing = false }
         finalizer.shutdown()
         super.onDestroy()
     }
@@ -328,13 +378,22 @@ class RecordingService : Service() {
             Intent(this, RecordingService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE,
         )
+        val pauseAction = if (paused) ACTION_RESUME else ACTION_PAUSE
+        val pauseIntent = PendingIntent.getService(
+            this, 2,
+            Intent(this, RecordingService::class.java).setAction(pauseAction),
+            PendingIntent.FLAG_IMMUTABLE,
+        )
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_mic)
             .setContentIntent(tapIntent)
             .setOngoing(true)
         return if (recording) {
-            builder.setContentTitle("Recording")
-                .setContentText("Transcribing on-device")
+            builder.setContentTitle(if (paused) "Recording paused" else "Recording")
+                .setContentText(if (paused) "Mic off" else "Transcribing on-device")
+                .addAction(
+                    Notification.Action.Builder(null, if (paused) "Resume" else "Pause", pauseIntent).build()
+                )
                 .addAction(Notification.Action.Builder(null, "Stop", stopIntent).build())
                 .build()
         } else {

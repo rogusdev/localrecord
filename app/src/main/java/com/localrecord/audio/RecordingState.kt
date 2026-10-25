@@ -15,6 +15,11 @@ object RecordingState {
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
 
+    /** True while the current recording is paused (mic off). */
+    private val _isPaused = MutableStateFlow(false)
+    val isPaused: StateFlow<Boolean> = _isPaused.asStateFlow()
+
+    /** Recorded audio so far; pauses don't count. */
     private val _elapsedMs = MutableStateFlow(0L)
     val elapsedMs: StateFlow<Long> = _elapsedMs.asStateFlow()
 
@@ -47,7 +52,12 @@ object RecordingState {
         _elapsedMs.value = 0L
         _transcriptionActive.value = transcribing
         _transcriptionError.value = error
+        _isPaused.value = false
         _isRecording.value = true
+    }
+
+    internal fun onPaused(paused: Boolean) {
+        _isPaused.value = paused
     }
 
     internal fun onElapsed(ms: Long) {
@@ -80,6 +90,7 @@ object RecordingState {
 
     internal fun onRecordingStopped() {
         _tentativeSegments.value = emptyList()
+        _isPaused.value = false
         _isRecording.value = false
         _transcriptionActive.value = false
     }

@@ -17,8 +17,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
@@ -30,6 +32,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -45,9 +48,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.localrecord.R
@@ -63,6 +70,7 @@ fun RecorderScreen(
     onRecordClick: () -> Unit,
 ) {
     val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
+    val isPaused by viewModel.isPaused.collectAsStateWithLifecycle()
     val elapsedMs by viewModel.elapsedMs.collectAsStateWithLifecycle()
     val segments by viewModel.liveSegments.collectAsStateWithLifecycle()
     val tentative by viewModel.tentativeSegments.collectAsStateWithLifecycle()
@@ -100,6 +108,18 @@ fun RecorderScreen(
         )
     }
 
+    var pendingRename by remember { mutableStateOf<Recording?>(null) }
+    pendingRename?.let { recording ->
+        RenameDialog(
+            recording,
+            onConfirm = { name ->
+                viewModel.renameRecording(recording, name)
+                pendingRename = null
+            },
+            onDismiss = { pendingRename = null },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -112,12 +132,23 @@ fun RecorderScreen(
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        // Recording: pause. Paused: stop, or resume recording into the same file.
         floatingActionButton = {
-            FloatingActionButton(onClick = onRecordClick) {
-                Icon(
-                    if (isRecording) Icons.Default.Stop else Icons.Default.Mic,
-                    contentDescription = if (isRecording) "Stop" else "Record",
-                )
+            when {
+                !isRecording -> FloatingActionButton(onClick = onRecordClick) {
+                    Icon(Icons.Default.Mic, contentDescription = "Record")
+                }
+                !isPaused -> FloatingActionButton(onClick = viewModel::pauseRecording) {
+                    Icon(Icons.Default.Pause, contentDescription = "Pause")
+                }
+                else -> Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    FloatingActionButton(onClick = viewModel::stopRecording) {
+                        Icon(Icons.Default.Stop, contentDescription = "Stop")
+                    }
+                    FloatingActionButton(onClick = viewModel::resumeRecording) {
+                        Icon(Icons.Default.Mic, contentDescription = "Resume")
+                    }
+                }
             }
         },
     ) { padding ->
@@ -134,8 +165,11 @@ fun RecorderScreen(
 
             if (isRecording) {
                 Text(
-                    text = formatElapsed(elapsedMs) +
-                        if (!transcribing) "  (recording only)" else "",
+                    text = formatElapsed(elapsedMs) + when {
+                        isPaused -> "  (paused)"
+                        !transcribing -> "  (recording only)"
+                        else -> ""
+                    },
                     style = MaterialTheme.typography.headlineMedium,
                 )
                 if (!transcribing) {
@@ -161,6 +195,7 @@ fun RecorderScreen(
                             finalizing = rec.wavFile.name in finalizing,
                             finalizeFailed = rec.wavFile.name in finalizeErrors,
                             onOpen = { viewModel.openPlayback(rec) },
+                            onRename = { pendingRename = rec },
                             onDelete = { pendingDelete = rec },
                         )
                         HorizontalDivider()
@@ -182,6 +217,33 @@ private fun ConfirmDeleteDialog(recording: Recording, onConfirm: () -> Unit, onD
         confirmButton = {
             TextButton(onClick = onConfirm) {
                 Text("Delete", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun RenameDialog(recording: Recording, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    var name by remember {
+        mutableStateOf(TextFieldValue(recording.name, selection = TextRange(0, recording.name.length)))
+    }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename recording") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                singleLine = true,
+                modifier = Modifier.focusRequester(focus),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(name.text) }, enabled = name.text.isNotBlank()) {
+                Text("Rename")
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
@@ -269,6 +331,7 @@ private fun RecordingRow(
     finalizing: Boolean,
     finalizeFailed: Boolean,
     onOpen: () -> Unit,
+    onRename: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -290,6 +353,10 @@ private fun RecordingRow(
                 },
                 style = MaterialTheme.typography.bodySmall,
             )
+        }
+        // The final pass writes to the file path it was queued with.
+        IconButton(onClick = onRename, enabled = !finalizing) {
+            Icon(Icons.Default.Edit, contentDescription = "Rename", Modifier.size(20.dp))
         }
         IconButton(onClick = { shareRecording(context, recording) }) {
             Icon(Icons.Default.Share, contentDescription = "Share", Modifier.size(20.dp))
