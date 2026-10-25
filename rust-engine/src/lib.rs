@@ -10,13 +10,15 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 mod engine;
 mod native;
+mod ogg;
 mod onsets;
+mod opus_file;
 mod session;
 mod speakers;
 mod vtt;
-mod wav;
 
 pub use engine::{EngineConfig, Segment, WhisperEngine, WhisperEngineError, Word};
+pub use opus_file::{recording_duration_ms, RecordingFile, RecordingStream, RecordingWriter};
 pub use session::LiveSession;
 pub use speakers::SpeakerEncoder;
 pub use vtt::{transcript_from_vtt, transcript_to_vtt};

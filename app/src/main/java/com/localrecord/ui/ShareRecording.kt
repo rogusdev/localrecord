@@ -15,10 +15,10 @@ private const val FILE_PROVIDER_SUFFIX = ".files"
  */
 fun shareRecording(context: Context, recording: Recording) {
     val authority = context.packageName + FILE_PROVIDER_SUFFIX
-    val uris = listOfNotNull(recording.wavFile, recording.transcriptFile)
+    val uris = listOfNotNull(recording.audioFile, recording.transcriptFile)
         .map { FileProvider.getUriForFile(context, authority, it) }
     val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-        type = if (uris.size == 1) "audio/wav" else "*/*"
+        type = if (uris.size == 1) "audio/ogg" else "*/*"
         putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
         // The chooser only forwards read grants for URIs in clipData.
         clipData = ClipData.newRawUri(recording.name, uris.first()).apply {

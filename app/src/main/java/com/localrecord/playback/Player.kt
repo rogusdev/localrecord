@@ -5,6 +5,7 @@ import android.media.AudioFormat
 import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.util.Log
+import com.localrecord.audio.RecordingService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -15,9 +16,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.whisper_engine.RecordingFile
+import uniffi.whisper_engine.WhisperEngineException
 import java.io.File
 import java.io.IOException
-import java.io.RandomAccessFile
 import java.util.concurrent.CountDownLatch
 
 private const val TAG = "Player"
@@ -25,31 +27,41 @@ private const val TAG = "Player"
 /** Position refresh while playing; well under one spoken word. */
 private const val POSITION_TICK_MS = 50L
 
-/** Bytes per AudioTrack write; a multiple of every frame size (2 or 4). */
-private const val WRITE_BYTES = 16 * 1024
+/** Frames (16-bit mono samples) per AudioTrack write: ~0.5 s. */
+private const val WRITE_FRAMES = 8 * 1024
+
+/** The engine decodes recordings to the rate they were captured at, mono. */
+private const val SAMPLE_RATE_HZ = RecordingService.SAMPLE_RATE_HZ
+
+private fun framesToMs(frames: Long): Long = frames * 1000 / SAMPLE_RATE_HZ
+
+private fun msToFrames(ms: Long): Long = ms * SAMPLE_RATE_HZ / 1000
 
 /**
- * Plays one recording (16-bit PCM WAV) through an AudioTrack and publishes
- * its position for the transcript highlight. The position is the frame the
- * speaker is playing now, from [AudioTrack.getTimestamp]; MediaPlayer's
- * position ran ~0.5 s ahead of the sound on the OnePlus 15.
- * Use from the main thread; [open] reads the header off it.
+ * Plays one recording (Ogg Opus, decoded by the Rust engine) through an
+ * AudioTrack and publishes its position for the transcript highlight. The
+ * position is the frame the speaker is playing now, from
+ * [AudioTrack.getTimestamp]; MediaPlayer's position ran ~0.5 s ahead of the
+ * sound on the OnePlus 15.
+ * Use from the main thread; [open] indexes the file off it.
  */
 class Player private constructor(
-    private val file: File,
-    private val format: WavFormat,
+    /** Holds the file's index, no file handle; each run streams its own. */
+    private val recording: RecordingFile,
+    private val name: String,
     private val scope: CoroutineScope,
 ) : AutoCloseable {
 
     companion object {
-        /** @throws IOException if the file can't be read or isn't 16-bit PCM WAV. */
+        /** @throws WhisperEngineException if the file can't be read or isn't Ogg Opus. */
         suspend fun open(file: File, scope: CoroutineScope): Player {
-            val format = withContext(Dispatchers.IO) { WavFormat.read(file) }
-            return Player(file, format, scope)
+            val recording = withContext(Dispatchers.IO) { RecordingFile(file.path) }
+            return Player(recording, file.name, scope)
         }
     }
 
-    val durationMs: Long = format.framesToMs(format.frames)
+    private val frames: Long = recording.frames()
+    val durationMs: Long = framesToMs(frames)
 
     private val _positionMs = MutableStateFlow(0L)
     val positionMs: StateFlow<Long> = _positionMs.asStateFlow()
@@ -65,7 +77,7 @@ class Player private constructor(
     fun play() {
         if (run != null) return
         if (_positionMs.value >= durationMs) _positionMs.value = 0
-        run = Run(format.msToFrames(_positionMs.value).coerceIn(0, format.frames))
+        run = Run(msToFrames(_positionMs.value).coerceIn(0, frames))
         _isPlaying.value = true
     }
 
@@ -92,8 +104,8 @@ class Player private constructor(
 
     /**
      * One AudioTrack from [startFrame] to the end or [stop]. A writer thread
-     * feeds it from the file and releases it once stopped, so the main thread
-     * never touches a released track.
+     * decodes the file into it and releases it once stopped, so the main
+     * thread never touches a released track.
      */
     private inner class Run(private val startFrame: Long) {
         private val track = AudioTrack.Builder()
@@ -106,11 +118,8 @@ class Player private constructor(
             .setAudioFormat(
                 AudioFormat.Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(format.sampleRateHz)
-                    .setChannelMask(
-                        if (format.channels == 1) AudioFormat.CHANNEL_OUT_MONO
-                        else AudioFormat.CHANNEL_OUT_STEREO
-                    )
+                    .setSampleRate(SAMPLE_RATE_HZ)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                     .build()
             )
             .setTransferMode(AudioTrack.MODE_STREAM)
@@ -144,11 +153,11 @@ class Player private constructor(
         fun positionMs(): Long {
             if (track.getTimestamp(timestamp)) {
                 val sinceNs = System.nanoTime() - timestamp.nanoTime
-                val now = timestamp.framePosition + sinceNs * format.sampleRateHz / 1_000_000_000
+                val now = timestamp.framePosition + sinceNs * SAMPLE_RATE_HZ / 1_000_000_000
                 // can't be past what the mixer has consumed
                 played = now.coerceIn(0, track.playbackHeadPosition.toLong() and 0xFFFFFFFFL)
             }
-            return format.framesToMs((startFrame + played).coerceAtMost(format.frames))
+            return framesToMs((startFrame + played).coerceAtMost(frames))
         }
 
         fun stop() {
@@ -161,25 +170,23 @@ class Player private constructor(
 
         private fun feed() {
             try {
-                RandomAccessFile(file, "r").use { raf ->
-                    raf.seek(format.dataOffset + startFrame * format.frameBytes)
-                    var remaining = (format.frames - startFrame) * format.frameBytes
-                    val buffer = ByteArray(WRITE_BYTES)
-                    while (remaining > 0 && !stopped) {
-                        val length = minOf(WRITE_BYTES.toLong(), remaining).toInt()
-                        raf.readFully(buffer, 0, length)
+                recording.streamFrom(startFrame).use { stream ->
+                    while (!stopped) {
+                        val pcm = stream.readPcm16(WRITE_FRAMES.toUInt())
+                        if (pcm.isEmpty()) break
                         var offset = 0
-                        while (offset < length && !stopped) {
-                            val written = track.write(buffer, offset, length - offset)
+                        while (offset < pcm.size && !stopped) {
+                            val written = track.write(pcm, offset, pcm.size - offset)
                             if (written < 0) throw IOException("AudioTrack write failed: $written")
                             offset += written
                         }
-                        remaining -= length
                     }
                 }
                 // the queued tail plays out; the ticker ends the run at the last frame
             } catch (e: IOException) {
-                Log.e(TAG, "playback of ${file.name} stopped", e)
+                Log.e(TAG, "playback of $name stopped", e)
+            } catch (e: WhisperEngineException) {
+                Log.e(TAG, "playback of $name stopped", e)
             }
             stoppedSignal.await()
             track.release()

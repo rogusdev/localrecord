@@ -44,8 +44,8 @@ class MainActivity : ComponentActivity() {
                 playback?.let {
                     PlaybackScreen(
                         it,
-                        finalizing = it.recording.wavFile.name in finalizing,
-                        finalizeError = finalizeErrors[it.recording.wavFile.name],
+                        finalizing = it.recording.audioFile.name in finalizing,
+                        finalizeError = finalizeErrors[it.recording.audioFile.name],
                         onTranscribeAgain = { viewModel.transcribeAgain(it.recording) },
                         onBack = viewModel::closePlayback,
                     )

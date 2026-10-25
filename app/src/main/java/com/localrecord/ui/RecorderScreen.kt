@@ -189,11 +189,11 @@ fun RecorderScreen(
                     LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
                 LazyColumn(modifier = Modifier.weight(1f)) {
-                    items(recordings, key = { it.wavFile.name }) { rec ->
+                    items(recordings, key = { it.audioFile.name }) { rec ->
                         RecordingRow(
                             rec,
-                            finalizing = rec.wavFile.name in finalizing,
-                            finalizeFailed = rec.wavFile.name in finalizeErrors,
+                            finalizing = rec.audioFile.name in finalizing,
+                            finalizeFailed = rec.audioFile.name in finalizeErrors,
                             onOpen = { viewModel.openPlayback(rec) },
                             onRename = { pendingRename = rec },
                             onDelete = { pendingDelete = rec },
@@ -212,7 +212,7 @@ private fun ConfirmDeleteDialog(recording: Recording, onConfirm: () -> Unit, onD
         onDismissRequest = onDismiss,
         title = { Text("Delete recording?") },
         text = {
-            Text("${recording.name} (${formatElapsed(recording.durationApproxMs)}) and its transcript will be deleted from this phone. Copies you shared elsewhere are not affected.")
+            Text("${recording.name} (${formatElapsed(recording.durationMs)}) and its transcript will be deleted from this phone. Copies you shared elsewhere are not affected.")
         },
         confirmButton = {
             TextButton(onClick = onConfirm) {
@@ -345,7 +345,7 @@ private fun RecordingRow(
         Column(Modifier.weight(1f)) {
             Text(recording.name, style = MaterialTheme.typography.bodyLarge)
             Text(
-                formatElapsed(recording.durationApproxMs) + when {
+                formatElapsed(recording.durationMs) + when {
                     finalizing -> " · finalizing transcript…"
                     finalizeFailed -> " · transcription failed"
                     recording.transcriptFile != null -> " · transcribed"

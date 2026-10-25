@@ -34,11 +34,11 @@ object RecordingState {
     private val _transcriptionActive = MutableStateFlow(false)
     val transcriptionActive: StateFlow<Boolean> = _transcriptionActive.asStateFlow()
 
-    /** Recordings (WAV names) whose final transcription pass is queued or running. */
+    /** Recordings (audio file names) whose final transcription pass is queued or running. */
     private val _finalizing = MutableStateFlow<Set<String>>(emptySet())
     val finalizing: StateFlow<Set<String>> = _finalizing.asStateFlow()
 
-    /** Why a recording's (WAV name's) last final pass failed; cleared when it's queued again. */
+    /** Why a recording's (audio file name's) last final pass failed; cleared when it's queued again. */
     private val _finalizeErrors = MutableStateFlow<Map<String, String>>(emptyMap())
     val finalizeErrors: StateFlow<Map<String, String>> = _finalizeErrors.asStateFlow()
 
@@ -70,13 +70,13 @@ object RecordingState {
         _transcriptionError.value = error
     }
 
-    internal fun onFinalizing(wavFile: File, running: Boolean) {
-        if (running) _finalizeErrors.update { it - wavFile.name }
-        _finalizing.update { if (running) it + wavFile.name else it - wavFile.name }
+    internal fun onFinalizing(audioFile: File, running: Boolean) {
+        if (running) _finalizeErrors.update { it - audioFile.name }
+        _finalizing.update { if (running) it + audioFile.name else it - audioFile.name }
     }
 
-    internal fun onFinalizeFailed(wavFile: File, error: String) {
-        _finalizeErrors.update { it + (wavFile.name to error) }
+    internal fun onFinalizeFailed(audioFile: File, error: String) {
+        _finalizeErrors.update { it + (audioFile.name to error) }
     }
 
     internal fun setTentative(segments: List<Segment>) {

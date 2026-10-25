@@ -5,9 +5,9 @@ use std::time::Instant;
 
 use crate::native::{Context, FullParams, NativeError, State};
 use crate::onsets;
+use crate::opus_file;
 use crate::session::{LiveSession, MIN_AUDIO_SAMPLES};
 use crate::speakers::{self, SpeakerEncoder};
-use crate::wav;
 use crate::{lock, pcm16_bytes_to_f32};
 
 /// Read by ggml when it creates the Vulkan device (first model load). On the
@@ -40,6 +40,8 @@ pub enum WhisperEngineError {
     EmptyAudio,
     #[error("can't read audio file: {msg}")]
     AudioFile { msg: String },
+    #[error("can't write audio file: {msg}")]
+    AudioWrite { msg: String },
     #[error("live session already finished")]
     SessionFinished,
     #[error("can't read transcript: {msg}")]
@@ -147,16 +149,17 @@ impl WhisperEngine {
         self.run_inference(&mut state, &samples, 0, &Pass::default())
     }
 
-    /// Accurate transcription of a whole recording (16 kHz mono 16-bit WAV),
-    /// meant as the final pass after recording stops: one call over all of
-    /// it, with beam search. With `speakers`, segments get speaker labels.
-    /// Blocking, and slow on long recordings; call from a background thread.
-    pub fn transcribe_wav(
+    /// Accurate transcription of a whole recording (an Ogg Opus file as
+    /// `RecordingWriter` writes), meant as the final pass after recording
+    /// stops: one call over all of it, with beam search. With `speakers`,
+    /// segments get speaker labels. Blocking, and slow on long recordings;
+    /// call from a background thread.
+    pub fn transcribe_recording(
         &self,
         path: String,
         speakers: Option<Arc<SpeakerEncoder>>,
     ) -> Result<Vec<Segment>, WhisperEngineError> {
-        let mut samples = wav::read_pcm16_mono_16k(Path::new(&path))
+        let mut samples = opus_file::read_samples(Path::new(&path))
             .map_err(|msg| WhisperEngineError::AudioFile { msg })?;
         if samples.is_empty() {
             return Err(WhisperEngineError::EmptyAudio);

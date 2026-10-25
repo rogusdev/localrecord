@@ -26,6 +26,7 @@ import com.localrecord.data.RecordingRepository
 import com.localrecord.engine.EngineManager
 import com.localrecord.model.ModelDownloader
 import uniffi.whisper_engine.LiveSession
+import uniffi.whisper_engine.RecordingWriter
 import uniffi.whisper_engine.Segment
 import uniffi.whisper_engine.WhisperEngineException
 import java.io.File
@@ -38,15 +39,16 @@ import kotlin.concurrent.thread
 import kotlin.concurrent.withLock
 
 /**
- * Foreground service that captures mic audio, writes it to a WAV file, and
- * feeds the same buffers to the Rust live-transcription session. Kotlin only
- * marshals buffers — all transcription logic is on the Rust side.
+ * Foreground service that captures mic audio, encodes it to an Ogg Opus file
+ * (Rust's [RecordingWriter]), and feeds the same buffers to the Rust
+ * live-transcription session. Kotlin only marshals buffers — all encoding and
+ * transcription logic is on the Rust side.
  *
  * Capture format is 16 kHz mono PCM16: exactly what Whisper consumes, so no
  * resampling and one shared buffer for both the file and the engine.
  *
  * Pausing releases the mic; the audio on either side of a pause is joined in
- * one WAV and one live session, so transcript times match the file.
+ * one file and one live session, so transcript times match the file.
  *
  * After a recording stops, its live transcript is saved as a draft. The
  * whole-recording pass (more accurate, but heavy on the GPU/CPU) runs only on
@@ -61,7 +63,7 @@ class RecordingService : Service() {
         const val ACTION_PAUSE = "com.localrecord.action.PAUSE_RECORDING"
         const val ACTION_RESUME = "com.localrecord.action.RESUME_RECORDING"
         const val ACTION_FINALIZE = "com.localrecord.action.FINALIZE_TRANSCRIPT"
-        private const val EXTRA_WAV_PATH = "wav_path"
+        private const val EXTRA_AUDIO_PATH = "audio_path"
 
         const val SAMPLE_RATE_HZ = 16_000
         private const val TAG = "RecordingService"
@@ -99,11 +101,11 @@ class RecordingService : Service() {
         }
 
         /** Queue a final transcription pass for an existing recording. */
-        fun finalize(context: Context, wavFile: File) {
+        fun finalize(context: Context, audioFile: File) {
             context.startForegroundService(
                 Intent(context, RecordingService::class.java)
                     .setAction(ACTION_FINALIZE)
-                    .putExtra(EXTRA_WAV_PATH, wavFile.path)
+                    .putExtra(EXTRA_AUDIO_PATH, audioFile.path)
             )
         }
 
@@ -156,7 +158,7 @@ class RecordingService : Service() {
                 stopIfIdle()
             }
             ACTION_FINALIZE -> {
-                val path = intent.getStringExtra(EXTRA_WAV_PATH)
+                val path = intent.getStringExtra(EXTRA_AUDIO_PATH)
                 if (path != null) enqueueFinal(File(path)) else stopIfIdle()
             }
         }
@@ -167,13 +169,13 @@ class RecordingService : Service() {
         capturing = true
         paused = false
         updateForeground()
-        val wavFile = RecordingRepository.newRecordingFile(this)
+        val audioFile = RecordingRepository.newRecordingFile(this)
         // Model load (first use) and transcription flush block; keep them off
         // the main thread.
-        captureThread = thread(name = "audio-capture") { captureLoop(wavFile) }
+        captureThread = thread(name = "audio-capture") { captureLoop(audioFile) }
     }
 
-    private fun captureLoop(wavFile: File) {
+    private fun captureLoop(audioFile: File) {
         // Engine is null when the model isn't downloaded yet: record anyway,
         // just without live transcription. A load failure is shown in the UI.
         var loadError: String? = null
@@ -191,7 +193,9 @@ class RecordingService : Service() {
             transcript += segments
             RecordingState.appendSegments(segments)
         }
-        captureAudio(wavFile, session, publish)
+        captureAudio(audioFile, session, publish)
+        // Capture also ends on its own after a mic or storage error.
+        signalCapture { capturing = false }
 
         // Flush the transcription tail and persist the transcript.
         if (session != null) {
@@ -203,7 +207,7 @@ class RecordingService : Service() {
             session.close()
         }
         if (transcript.isNotEmpty()) {
-            RecordingRepository.writeTranscript(wavFile, transcript)
+            RecordingRepository.writeTranscript(audioFile, transcript)
         }
         RecordingState.onRecordingStopped()
         val thisThread = Thread.currentThread()
@@ -218,9 +222,9 @@ class RecordingService : Service() {
     }
 
     /** Main thread. */
-    private fun enqueueFinal(wavFile: File) {
+    private fun enqueueFinal(audioFile: File) {
         pendingFinals++
-        RecordingState.onFinalizing(wavFile, true)
+        RecordingState.onFinalizing(audioFile, true)
         updateForeground()
         finalizer.execute {
             // A foreground service doesn't keep the CPU awake; without this
@@ -229,13 +233,13 @@ class RecordingService : Service() {
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "localrecord:final-pass")
             wakeLock.acquire(FINAL_PASS_WAKE_LOCK_MS)
             try {
-                finalizeTranscript(wavFile)
+                finalizeTranscript(audioFile)
             } finally {
                 if (wakeLock.isHeld) wakeLock.release()
             }
             mainHandler.post {
                 pendingFinals--
-                RecordingState.onFinalizing(wavFile, false)
+                RecordingState.onFinalizing(audioFile, false)
                 updateForeground()
                 stopIfIdle()
             }
@@ -243,25 +247,25 @@ class RecordingService : Service() {
     }
 
     /** Replace the live draft with a whole-recording pass. Blocking; finalizer thread. */
-    private fun finalizeTranscript(wavFile: File) {
+    private fun finalizeTranscript(audioFile: File) {
         try {
             val engine = EngineManager.finalEngineOrLoad(this)
             if (engine == null) {
-                RecordingState.onFinalizeFailed(wavFile, "speech models aren't downloaded")
+                RecordingState.onFinalizeFailed(audioFile, "speech models aren't downloaded")
                 return
             }
-            val segments = engine.transcribeWav(wavFile.path, EngineManager.speakersOrLoad(this))
+            val segments = engine.transcribeRecording(audioFile.path, EngineManager.speakersOrLoad(this))
             // An empty final pass over audio the draft found speech in is
             // more likely a failure than the truth; keep the draft then.
-            if (segments.isNotEmpty() || !RecordingRepository.transcriptFileFor(wavFile).exists()) {
-                RecordingRepository.writeTranscript(wavFile, segments)
+            if (segments.isNotEmpty() || !RecordingRepository.transcriptFileFor(audioFile).exists()) {
+                RecordingRepository.writeTranscript(audioFile, segments)
             }
         } catch (e: WhisperEngineException) {
-            Log.e(TAG, "final pass failed for ${wavFile.name}; keeping the live transcript", e)
-            RecordingState.onFinalizeFailed(wavFile, e.message ?: "transcription failed")
+            Log.e(TAG, "final pass failed for ${audioFile.name}; keeping the live transcript", e)
+            RecordingState.onFinalizeFailed(audioFile, e.message ?: "transcription failed")
         } catch (e: IOException) {
-            Log.e(TAG, "can't save the transcript of ${wavFile.name}", e)
-            RecordingState.onFinalizeFailed(wavFile, "can't save the transcript: ${e.message}")
+            Log.e(TAG, "can't save the transcript of ${audioFile.name}", e)
+            RecordingState.onFinalizeFailed(audioFile, "can't save the transcript: ${e.message}")
         }
     }
 
@@ -291,7 +295,7 @@ class RecordingService : Service() {
 
     @SuppressLint("MissingPermission") // UI checks RECORD_AUDIO before starting
     private fun captureAudio(
-        wavFile: File,
+        audioFile: File,
         session: LiveSession?,
         publish: (List<Segment>) -> Unit,
     ) {
@@ -316,7 +320,7 @@ class RecordingService : Service() {
             live.failure()?.let(RecordingState::onTranscriptionFailed)
         }
         try {
-            WavWriter(wavFile, SAMPLE_RATE_HZ).use { wav ->
+            RecordingWriter(audioFile.path).use { writer ->
                 val buffer = ByteArray(READ_BUFFER_BYTES)
                 var reads = 0
                 var recordedBytes = 0L
@@ -343,14 +347,19 @@ class RecordingService : Service() {
                         break
                     }
                     if (read == 0) continue
-                    wav.write(buffer, read)
-                    session?.feedPcm16(if (read == buffer.size) buffer else buffer.copyOf(read))
+                    val pcm = if (read == buffer.size) buffer else buffer.copyOf(read)
+                    writer.writePcm16(pcm)
+                    session?.feedPcm16(pcm)
                     // Audio time, so pauses don't count.
                     recordedBytes += read
                     RecordingState.onElapsed(recordedBytes * 1000 / BYTES_PER_SECOND)
                     if (session != null && ++reads % DRAIN_EVERY_READS == 0) drain(session)
                 }
+                writer.finish()
             }
+        } catch (e: WhisperEngineException) {
+            // Storage full or gone: the file keeps what was written before.
+            Log.e(TAG, "can't write ${audioFile.name}; stopping", e)
         } finally {
             runCatching { recorder.stop() }
             recorder.release()

@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
+import uniffi.whisper_engine.RecordingFile
 import uniffi.whisper_engine.WhisperEngineException
 import uniffi.whisper_engine.transcriptFromVtt
 import java.io.ByteArrayOutputStream
@@ -13,6 +14,8 @@ import java.io.IOException
 private const val TAG = "RecordingImport"
 /** Larger "transcripts" are refused unread; an hour of speech is ~200 KB. */
 private const val MAX_TRANSCRIPT_BYTES = 10L * 1024 * 1024
+/** Ogg Opus recordings; .opus is the same format, saved as .ogg. */
+private val AUDIO_EXTENSIONS = setOf(RecordingRepository.AUDIO_EXTENSION, "opus")
 
 /** Picked files by display name: copied in, or skipped with the reason. */
 data class ImportResult(
@@ -21,10 +24,11 @@ data class ImportResult(
 )
 
 /**
- * Copies .wav recordings and their .vtt transcripts picked through the
- * system file picker (Drive, Downloads, ...) into the recordings dir.
- * Existing files are never overwritten; a .vtt must parse and needs a .wav
- * of the same name, picked with it or already here. Blocking IO.
+ * Copies Ogg Opus recordings (.ogg/.opus) and their .vtt transcripts picked
+ * through the system file picker (Drive, Downloads, ...) into the recordings
+ * dir. Existing files are never overwritten; a recording must decode, a .vtt
+ * must parse and needs a recording of the same name, picked with it or
+ * already here. Blocking IO.
  */
 fun importRecordings(context: Context, uris: List<Uri>): ImportResult {
     val dir = RecordingRepository.recordingsDir(context)
@@ -33,20 +37,23 @@ fun importRecordings(context: Context, uris: List<Uri>): ImportResult {
     val picked = uris.map { it to displayName(context, it) }
     val (named, unnamed) = picked.partition { (_, name) -> name.baseName().isNotBlank() }
     unnamed.forEach { (_, name) -> skipped += name to "no file name" }
-    val (wavs, rest) = named.partition { (_, name) -> name.lowercaseExtension() == "wav" }
+    val (audios, rest) = named.partition { (_, name) -> name.lowercaseExtension() in AUDIO_EXTENSIONS }
     val (vtts, other) = rest.partition { (_, name) -> name.lowercaseExtension() == "vtt" }
-    other.forEach { (_, name) -> skipped += name to "not a .wav or .vtt" }
+    other.forEach { (_, name) -> skipped += name to "not an .ogg, .opus or .vtt" }
 
-    // .wav first, so a transcript picked with its recording finds it.
-    for ((uri, name) in wavs) {
-        val target = File(dir, "${name.baseName()}.wav")
+    // Recordings first, so a transcript picked with its recording finds it.
+    for ((uri, name) in audios) {
+        val target = audioFileFor(dir, name)
         if (target.exists()) {
             skipped += name to "a recording with that name is already here"
             continue
         }
         try {
-            copy(context, uri, target)
+            copy(context, uri, target) { RecordingFile(it.path).close() }
             imported += name
+        } catch (e: WhisperEngineException) {
+            Log.w(TAG, "can't import $name", e)
+            skipped += name to "not an Ogg Opus recording"
         } catch (e: IOException) {
             Log.w(TAG, "can't import $name", e)
             skipped += name to (e.message ?: "can't read it")
@@ -57,10 +64,10 @@ fun importRecordings(context: Context, uris: List<Uri>): ImportResult {
     }
 
     for ((uri, name) in vtts) {
-        val wav = File(dir, "${name.baseName()}.wav")
-        val target = RecordingRepository.transcriptFileFor(wav)
+        val audio = audioFileFor(dir, name)
+        val target = RecordingRepository.transcriptFileFor(audio)
         when {
-            !wav.exists() -> skipped += name to "no ${wav.name} to go with it"
+            !audio.exists() -> skipped += name to "no ${audio.name} to go with it"
             target.exists() -> skipped += name to "that recording already has a transcript"
             else -> try {
                 val text = readTranscriptText(context, uri)
@@ -97,13 +104,20 @@ private fun String.lowercaseExtension(): String = substringAfterLast('.', "").lo
 
 private fun String.baseName(): String = substringBeforeLast('.')
 
-/** Streams [uri] into a hidden temp file, then renames it, so a failed copy never lists. */
-private fun copy(context: Context, uri: Uri, target: File) {
+private fun audioFileFor(dir: File, pickedName: String): File =
+    File(dir, "${pickedName.baseName()}.${RecordingRepository.AUDIO_EXTENSION}")
+
+/**
+ * Streams [uri] into a hidden temp file, [check]s it, then renames it, so a
+ * failed or rejected copy never lists.
+ */
+private fun copy(context: Context, uri: Uri, target: File, check: (File) -> Unit) {
     val temp = File(target.parentFile, ".${target.name}.part")
     try {
         val input = context.contentResolver.openInputStream(uri)
             ?: throw IOException("provider returned no data")
         input.use { source -> temp.outputStream().use { source.copyTo(it) } }
+        check(temp)
         if (!temp.renameTo(target)) throw IOException("can't save ${target.name}")
     } finally {
         temp.delete()

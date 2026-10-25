@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.whisper_engine.Segment
+import uniffi.whisper_engine.WhisperEngineException
 import java.io.IOException
 
 /** An open recording: its player and saved transcript (null if none). */
@@ -77,9 +78,9 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
                 if (done.isEmpty()) return@collect
                 refreshRecordings()
                 val open = _playback.value ?: return@collect
-                if (open.recording.wavFile.name in done) {
+                if (open.recording.audioFile.name in done) {
                     val transcript = withContext(Dispatchers.IO) {
-                        RecordingRepository.readTranscript(open.recording.wavFile)
+                        RecordingRepository.readTranscript(open.recording.audioFile)
                     }
                     _playback.value = _playback.value?.takeIf { it.player === open.player }
                         ?.copy(transcript = transcript)
@@ -111,12 +112,12 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             closePlayback()
             val transcript = withContext(Dispatchers.IO) {
-                RecordingRepository.readTranscript(recording.wavFile)
+                RecordingRepository.readTranscript(recording.audioFile)
             }
             val player = try {
-                Player.open(recording.wavFile, viewModelScope)
-            } catch (e: IOException) {
-                Log.e(TAG, "can't play ${recording.wavFile.name}", e)
+                Player.open(recording.audioFile, viewModelScope)
+            } catch (e: WhisperEngineException) {
+                Log.e(TAG, "can't play ${recording.audioFile.name}", e)
                 _message.value = "Can't play ${recording.name}: ${e.message}"
                 return@launch
             }
@@ -126,7 +127,7 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Re-run the accurate whole-recording transcription; replaces the transcript. */
     fun transcribeAgain(recording: Recording) =
-        RecordingService.finalize(getApplication(), recording.wavFile)
+        RecordingService.finalize(getApplication(), recording.audioFile)
 
     fun closePlayback() {
         _playback.value?.player?.close()
@@ -167,7 +168,7 @@ class RecorderViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Renames a recording and its transcript; not while its final pass is queued or running. */
     fun renameRecording(recording: Recording, newName: String) {
-        if (recording.wavFile.name in finalizing.value) {
+        if (recording.audioFile.name in finalizing.value) {
             _message.value = "Can't rename ${recording.name} while its transcript is being refined."
             return
         }

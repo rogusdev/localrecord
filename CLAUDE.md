@@ -11,15 +11,16 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
 
 - **UI/Android layer** (`app/`): Kotlin, single-activity, Jetpack Compose
   - `RecordingService`: foreground service; one capture thread does
-    AudioRecord (16 kHz mono PCM16) → WAV file + Rust session, drains
+    AudioRecord (16 kHz mono PCM16) → Ogg Opus file (Rust's
+    `RecordingWriter`) + Rust session, drains
     segments, flushes and writes the live transcript on stop as a draft: a
     WebVTT `.vtt`: a cue per segment, speaker as `<v Speaker n>`, an inline
     start timestamp before every word; playback reads it back
     (`RecordingRepository` does the file IO, Rust's `vtt.rs` the format).
     The record button pauses; paused offers resume or stop. Pause stops
-    AudioRecord (mic off); resume appends to the same WAV and live session.
+    AudioRecord (mic off); resume appends to the same file and live session.
     On stop a toast points to playback's "Refine transcript" button, which
-    queues the final pass (`transcribe_wav` with small.en) on a
+    queues the final pass (`transcribe_recording` with small.en) on a
     single-thread, background-priority queue holding a partial wakelock; it
     overwrites the draft. Not automatic: it loads the phone heavily (~an
     hour of audio ≈ 11+ min of GPU). The service stays foreground
@@ -29,18 +30,19 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
   - `EngineManager`: owns the loaded models: live engine (base.en) and
     speaker model, preloaded by the ViewModel; final engine (small.en)
     loaded on the first final pass
-  - `Player` + `PlaybackScreen`: AudioTrack playback of the WAV, position
+  - `Player` + `PlaybackScreen`: AudioTrack playback of the recording
+    (decoded in Rust: `RecordingFile` / `RecordingStream`), position
     from `AudioTrack.getTimestamp` (the frame at the speaker; MediaPlayer's
     position ran ~0.5 s ahead of the sound on the OnePlus 15); highlights
     the word at the play position from the `.vtt` word timestamps; tap a
     word or timestamp to seek
-  - Sharing: `shareRecording` sends the `.wav` and `.vtt` through a
+  - Sharing: `shareRecording` sends the `.ogg` and `.vtt` through a
     FileProvider to the share sheet. No Drive API/OAuth on purpose: that
     needs a Google Cloud project
   - Import (`importRecordings`): the system file picker (Drive etc. as
-    document providers) copies `.wav`s and their `.vtt`s into the
-    recordings dir; never overwrites, a `.vtt` must parse and have its
-    `.wav`
+    document providers) copies `.ogg`/`.opus` recordings (saved as `.ogg`,
+    must decode as Ogg Opus) and their `.vtt`s into the recordings dir;
+    never overwrites, a `.vtt` must parse and have its recording
 - **Transcription engine** (`rust-engine/`): Rust crate over
   `whisper-rs-sys` 0.15 (raw bindings; it bundles and builds whisper.cpp,
   nothing vendored here), built for Android via `cargo-ndk`
@@ -50,7 +52,14 @@ Built as a personal replacement for Pixel Recorder on a OnePlus 15.
     rest of the process; recording continues and the UI shows the error
   - Adreno 840: ggml's fp16 Vulkan shaders hit `ErrorDeviceLost`, so the
     engine sets `GGML_VK_DISABLE_F16` before the first model load
-  - `transcribe_wav` (final pass): reads the WAV in Rust (`src/wav.rs`),
+  - Recordings are Ogg Opus only: `src/opus_file.rs` over libopus
+    (`opus` crate, bundled libopus built by CMake, linked statically) and
+    `src/ogg.rs` (pages). 16 kHz mono at 24 kbit/s (~11 MB an hour vs
+    115 MB as PCM). A page reaches the file about once a second, so a crash
+    loses at most ~1 s. Decoding is straight to 16 kHz; `RecordingFile`
+    indexes the pages once, seeks start 80 ms early (decoder pre-roll), and
+    `recording_duration_ms` reads only the first and last pages (list view)
+  - `transcribe_recording` (final pass): decodes the Ogg Opus file in Rust,
     one `whisper_full` over the whole recording with beam search (5) and
     no text carried between whisper's 30 s windows (carrying it set off a
     repetition loop on the phone), drops word-for-word repeated segments
