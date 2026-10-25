@@ -1,5 +1,5 @@
-// C++ exception barrier for the Rust engine (see src/native.rs). whisper.cpp
-// and ggml's Vulkan backend throw (e.g. vk::Queue::submit: ErrorDeviceLost);
+// C++ exception barrier for the Rust engine (see src/native.rs). ONNX Runtime
+// throws through sherpa-onnx's C API (e.g. Ort::Exception on an empty input);
 // Rust can't catch foreign exceptions, so throwing calls run inside this
 // try/catch and come back as an error string instead of aborting the process.
 

@@ -44,14 +44,15 @@ import kotlin.concurrent.withLock
  * live-transcription session. Kotlin only marshals buffers — all encoding and
  * transcription logic is on the Rust side.
  *
- * Capture format is 16 kHz mono PCM16: exactly what Whisper consumes, so no
- * resampling and one shared buffer for both the file and the engine.
+ * Capture format is 16 kHz mono PCM16: exactly what the speech model
+ * consumes, so no resampling and one shared buffer for both the file and the
+ * engine.
  *
  * Pausing releases the mic; the audio on either side of a pause is joined in
  * one file and one live session, so transcript times match the file.
  *
  * After a recording stops, its live transcript is saved as a draft. The
- * whole-recording pass (more accurate, but heavy on the GPU/CPU) runs only on
+ * whole-recording pass (more accurate, but minutes of CPU work) runs only on
  * request: [finalize] queues it, and it replaces the draft when done. The
  * service stays in the foreground until capture and the queue are both done.
  */
@@ -109,7 +110,7 @@ class RecordingService : Service() {
             )
         }
 
-        /** Foreground type for the final pass: no mic, just CPU/GPU work. */
+        /** Foreground type for the final pass: no mic, just CPU work. */
         private val PROCESSING_TYPE =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
@@ -130,8 +131,8 @@ class RecordingService : Service() {
 
     /**
      * Final passes run one at a time, off the capture thread, at background
-     * priority (nice 10) so the phone stays usable; whisper.cpp's worker
-     * threads inherit it.
+     * priority (nice 10) so the phone stays usable; the engine decodes on the
+     * calling thread, so the whole pass runs at it.
      */
     private val finalizer: ExecutorService = Executors.newSingleThreadExecutor { task ->
         Thread({
@@ -214,7 +215,7 @@ class RecordingService : Service() {
         mainHandler.post {
             // A new recording may already have started its own capture thread.
             if (captureThread === thisThread) captureThread = null
-            if (ModelDownloader.finalModelFile(this).exists()) {
+            if (ModelDownloader.speechModelReady(this)) {
                 Toast.makeText(this, REFINE_HINT, Toast.LENGTH_LONG).show()
             }
             stopIfIdle()
@@ -249,9 +250,9 @@ class RecordingService : Service() {
     /** Replace the live draft with a whole-recording pass. Blocking; finalizer thread. */
     private fun finalizeTranscript(audioFile: File) {
         try {
-            val engine = EngineManager.finalEngineOrLoad(this)
+            val engine = EngineManager.getOrLoad(this)
             if (engine == null) {
-                RecordingState.onFinalizeFailed(audioFile, "speech models aren't downloaded")
+                RecordingState.onFinalizeFailed(audioFile, "the speech model isn't downloaded")
                 return
             }
             val segments = engine.transcribeRecording(audioFile.path, EngineManager.speakersOrLoad(this))
@@ -317,7 +318,6 @@ class RecordingService : Service() {
         val drain = { live: LiveSession ->
             publish(live.drainSegments())
             RecordingState.setTentative(live.tentative())
-            live.failure()?.let(RecordingState::onTranscriptionFailed)
         }
         try {
             RecordingWriter(audioFile.path).use { writer ->

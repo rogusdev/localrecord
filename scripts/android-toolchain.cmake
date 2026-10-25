@@ -1,7 +1,8 @@
-# CMake toolchain for whisper-rs-sys's whisper.cpp build (CMAKE_TOOLCHAIN_FILE,
-# set by scripts/build-rust.sh). The cmake crate passes no ANDROID_ABI or
-# ANDROID_PLATFORM, so derive them from cargo's TARGET (inherited from the build
-# script) and ANDROID_PLATFORM, then defer to the NDK's own toolchain file.
+# CMake toolchain for the opus crate's bundled libopus build
+# (CMAKE_TOOLCHAIN_FILE, set by scripts/build-rust.sh). The cmake crate passes
+# no ANDROID_ABI or ANDROID_PLATFORM, so derive them from cargo's TARGET
+# (inherited from the build script) and ANDROID_PLATFORM, then defer to the
+# NDK's own toolchain file.
 
 set(ANDROID_NDK "$ENV{ANDROID_NDK_HOME}")
 set(ANDROID_PLATFORM "$ENV{ANDROID_PLATFORM}")

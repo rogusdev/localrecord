@@ -15,24 +15,50 @@ import java.io.IOException
 import java.security.MessageDigest
 
 /**
- * One-time download of the model files: Whisper base.en for live
- * transcription, Whisper small.en for the on-demand final pass, and a
- * speaker-embedding model for speaker labels. After this completes the app
- * never needs the network again.
+ * One-time download of the model files: Parakeet for transcription (live
+ * and the on-demand final pass) and a speaker-embedding model for speaker
+ * labels. After this completes the app never needs the network again.
  */
 object ModelDownloader {
 
-    /** URLs are pinned to a revision so the SHA-256 stays valid. */
+    /** Directory under the models dir holding the speech model's files. */
+    private const val PARAKEET_DIR = "parakeet-tdt-0.6b-v2-int8"
+    private const val PARAKEET_URL =
+        "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/" +
+            "1ab9323565ddb038682214b292f588070a538ce2/"
+
+    /**
+     * URLs are pinned to a revision so the SHA-256 stays valid. [name] is a
+     * path under the models dir.
+     */
     private class ModelFile(val name: String, val url: String, val sha256: String, val bytes: Long)
 
-    // Quantized base.en: ~60 MB, good latency/accuracy starting point for
-    // on-device English. Swap for small.en-q5_1 if accuracy disappoints.
-    private val WHISPER = ModelFile(
-        name = "ggml-base.en-q5_1.bin",
-        url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/" +
-            "f281eb45af861ab5e5297d23694b7d46e090c02c/ggml-base.en-q5_1.bin",
-        sha256 = "4baf70dd0d7c4247ba2b81fafd9c01005ac77c2f9ef064e00dcf195d0e2fdd2f",
-        bytes = 59_721_011,
+    private fun parakeetFile(file: String, sha256: String, bytes: Long) =
+        ModelFile("$PARAKEET_DIR/$file", PARAKEET_URL + file, sha256, bytes)
+
+    // NVIDIA's Parakeet TDT 0.6B v2 (English, CC-BY-4.0) as sherpa-onnx's
+    // int8 export; the four files make one model.
+    private val PARAKEET = listOf(
+        parakeetFile(
+            "encoder.int8.onnx",
+            "a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab",
+            652_184_296,
+        ),
+        parakeetFile(
+            "decoder.int8.onnx",
+            "b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e",
+            7_257_753,
+        ),
+        parakeetFile(
+            "joiner.int8.onnx",
+            "7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2",
+            1_739_080,
+        ),
+        parakeetFile(
+            "tokens.txt",
+            "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d",
+            9_384,
+        ),
     )
 
     // 3D-Speaker CAM++ "zh_en common advanced" voiceprints (3D-Speaker,
@@ -46,21 +72,14 @@ object ModelDownloader {
         bytes = 28_281_164,
     )
 
-    // Final whole-recording pass: on AMI meeting excerpts 24% WER vs 28% for
-    // live base.en with context; medium.en and large-v3-turbo were no better
-    // at 3-5x the time.
-    private val FINAL_WHISPER = ModelFile(
-        name = "ggml-small.en-q5_1.bin",
-        url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/" +
-            "5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.en-q5_1.bin",
-        sha256 = "bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30",
-        bytes = 190_098_681,
-    )
-
-    private val ALL = listOf(WHISPER, SPEAKER, FINAL_WHISPER)
+    private val ALL = PARAKEET + SPEAKER
 
     /** Model files earlier builds downloaded; deleted to reclaim space. */
-    private val OBSOLETE = listOf("3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx")
+    private val OBSOLETE = listOf(
+        "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+        "ggml-base.en-q5_1.bin",
+        "ggml-small.en-q5_1.bin",
+    )
 
     private const val BYTES_PER_MB = 1_000_000L
 
@@ -77,20 +96,23 @@ object ModelDownloader {
     /** Serializes downloads: two writers on the same .part file corrupt the model. */
     private val downloadLock = Mutex()
 
-    fun modelFile(context: Context): File = fileFor(context, WHISPER)
+    /** The speech model's directory, for [uniffi.whisper_engine.SpeechEngine]. */
+    fun speechModelDir(context: Context): File = File(modelsDir(context), PARAKEET_DIR)
+
+    fun speechModelReady(context: Context): Boolean = PARAKEET.all { fileFor(context, it).exists() }
 
     fun speakerModelFile(context: Context): File = fileFor(context, SPEAKER)
 
-    fun finalModelFile(context: Context): File = fileFor(context, FINAL_WHISPER)
+    private fun modelsDir(context: Context): File = File(context.filesDir, "models")
 
     private fun fileFor(context: Context, model: ModelFile): File =
-        File(File(context.filesDir, "models").apply { mkdirs() }, model.name)
+        File(modelsDir(context), model.name).apply { parentFile?.mkdirs() }
 
     private fun missing(context: Context): List<ModelFile> =
         ALL.filterNot { fileFor(context, it).exists() }
 
     fun refreshState(context: Context) {
-        OBSOLETE.forEach { File(File(context.filesDir, "models"), it).delete() }
+        OBSOLETE.forEach { File(modelsDir(context), it).delete() }
         val missing = missing(context)
         _state.value = if (missing.isEmpty()) State.Ready
         else State.NotDownloaded(missing.sumOf { it.bytes } / BYTES_PER_MB)

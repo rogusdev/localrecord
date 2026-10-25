@@ -1,32 +1,31 @@
-//! Minimal safe layer over whisper.cpp (via whisper-rs-sys) that survives C++
-//! exceptions. whisper.cpp and ggml's Vulkan backend throw; an exception
-//! reaching Rust aborts the whole process (recording included). Every call
-//! that can throw runs inside the C++ try/catch in src/catch.cpp and comes
-//! back as `NativeError::Exception`.
+//! Minimal safe layer over sherpa-onnx's offline recognizer (its C API, via
+//! sherpa-onnx-sys) that survives C++ exceptions. ONNX Runtime throws (e.g.
+//! `Ort::Exception` on an input it can't take) and the C API lets it through;
+//! an exception reaching Rust aborts the whole process (recording included).
+//! Every call that can throw runs inside the C++ try/catch in src/catch.cpp
+//! and comes back as `NativeError::Exception`.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::fmt;
-use std::fs::File;
-use std::io::Read;
-use std::marker::PhantomData;
 use std::path::Path;
 use std::ptr::NonNull;
-use std::sync::Arc;
 
-use whisper_rs_sys as sys;
+use serde::Deserialize;
+use sherpa_onnx_sys as sys;
 
 /// Buffer for a caught exception's message, NUL included.
 const EXCEPTION_MSG_CAP: usize = 512;
-/// A ggml whisper model file starts with this magic ("ggml"), then its
-/// hparams as little-endian i32s: n_vocab, n_audio_ctx, n_audio_state,
-/// n_audio_head, n_audio_layer, n_text_ctx, n_text_state, n_text_head,
-/// n_text_layer, n_mels, ftype.
-const GGML_MAGIC: u32 = 0x6767_6d6c;
-const MODEL_HEADER_LEN: usize = 4 + 11 * 4;
-/// Vocabulary size of the English-only models; multilingual ones are larger.
-const N_VOCAB_ENGLISH: i32 = 51_864;
-/// large-v3 (and turbo) take 128 mel bins; earlier models 80.
-const N_MELS_LARGE_V3: i32 = 128;
+/// A model directory's files, named as in sherpa-onnx's int8 Parakeet exports.
+const ENCODER_FILE: &str = "encoder.int8.onnx";
+const DECODER_FILE: &str = "decoder.int8.onnx";
+const JOINER_FILE: &str = "joiner.int8.onnx";
+const TOKENS_FILE: &str = "tokens.txt";
+/// NeMo transducers, Parakeet TDT among them.
+const MODEL_TYPE: &CStr = c"nemo_transducer";
+const SAMPLE_RATE_HZ: c_int = 16_000;
+/// sherpa-onnx's default; NeMo models use the feature size in the model file
+/// (128 mel bins for Parakeet).
+const FEATURE_DIM: c_int = 80;
 
 extern "C" {
     /// src/catch.cpp: calls `f(data)`; on a C++ exception writes its message
@@ -39,33 +38,37 @@ extern "C" {
     ) -> c_int;
 }
 
-// The whisper.cpp entry points that can throw, redeclared "C-unwind" (whisper-rs-sys
+// The sherpa-onnx entry points used here, redeclared "C-unwind" (sherpa-onnx-sys
 // declares everything "C") so an exception may legally unwind through the Rust
 // frames between them and lr_catch_exceptions.
 extern "C-unwind" {
-    fn whisper_init_from_file_with_params_no_state(
-        path_model: *const c_char,
-        params: sys::whisper_context_params,
-    ) -> *mut sys::whisper_context;
-    fn whisper_init_state(ctx: *mut sys::whisper_context) -> *mut sys::whisper_state;
-    fn whisper_full_with_state(
-        ctx: *mut sys::whisper_context,
-        state: *mut sys::whisper_state,
-        params: sys::whisper_full_params,
+    fn SherpaOnnxCreateOfflineRecognizer(
+        config: *const sys::OfflineRecognizerConfig,
+    ) -> *const sys::OfflineRecognizer;
+    fn SherpaOnnxDestroyOfflineRecognizer(recognizer: *const sys::OfflineRecognizer);
+    fn SherpaOnnxCreateOfflineStream(
+        recognizer: *const sys::OfflineRecognizer,
+    ) -> *const sys::OfflineStream;
+    fn SherpaOnnxDestroyOfflineStream(stream: *const sys::OfflineStream);
+    fn SherpaOnnxAcceptWaveformOffline(
+        stream: *const sys::OfflineStream,
+        sample_rate: c_int,
         samples: *const f32,
-        n_samples: c_int,
-    ) -> c_int;
-    // Freeing GPU buffers waits on fences, which throws after a device loss.
-    fn whisper_free_state(state: *mut sys::whisper_state);
-    fn whisper_free(ctx: *mut sys::whisper_context);
+        n: c_int,
+    );
+    fn SherpaOnnxDecodeOfflineStream(
+        recognizer: *const sys::OfflineRecognizer,
+        stream: *const sys::OfflineStream,
+    );
+    fn SherpaOnnxGetOfflineStreamResultAsJson(stream: *const sys::OfflineStream) -> *const c_char;
+    fn SherpaOnnxDestroyOfflineStreamResultJson(json: *const c_char);
 }
 
 #[derive(Debug)]
 pub(crate) enum NativeError {
-    /// A C++ exception escaped whisper.cpp/ggml. The GPU backend may be gone
-    /// for the rest of the process (e.g. Vulkan device lost).
+    /// A C++ exception escaped sherpa-onnx / ONNX Runtime.
     Exception(String),
-    /// whisper.cpp reported failure through its return value.
+    /// sherpa-onnx reported failure, or its output was unusable.
     Failed(String),
 }
 
@@ -118,331 +121,150 @@ fn catch_exceptions<F: FnOnce() -> R, R>(f: F) -> Result<R, NativeError> {
         .ok_or_else(|| NativeError::Failed("native callback did not run".to_string()))
 }
 
-/// A loaded model. whisper.cpp only reads it after loading, so it is shared
-/// across threads; each concurrent inference needs its own `State`.
-pub(crate) struct Context(NonNull<sys::whisper_context>);
+/// One recognized token: a SentencePiece piece, where a leading space starts
+/// a word. Times are seconds from the start of the decoded audio.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Token {
+    pub text: String,
+    /// The encoder frame (80 ms) the token was emitted on.
+    pub start_s: f32,
+    /// Frames TDT skipped after the token: 0 when the next token shares its frame.
+    pub duration_s: f32,
+}
 
-// SAFETY: the context is immutable after load (see above).
-unsafe impl Send for Context {}
-unsafe impl Sync for Context {}
+/// The parts of sherpa-onnx's JSON result used here.
+#[derive(Deserialize)]
+struct RawResult {
+    tokens: Vec<String>,
+    timestamps: Option<Vec<f32>>,
+    durations: Option<Vec<f32>>,
+}
 
-impl Context {
-    /// With `aligned_words`, token times come from DTW over the model's
-    /// alignment heads (`TokenData::t_dtw`); whisper.cpp can't do that with
-    /// flash attention, so it is turned off.
-    pub(crate) fn load(
-        path: &str,
-        use_gpu: bool,
-        flash_attn: bool,
-        aligned_words: bool,
-    ) -> Result<Self, NativeError> {
-        let c_path = CString::new(path)
-            .map_err(|_| NativeError::Failed("model path contains a NUL byte".to_string()))?;
-        // SAFETY: plain value constructor.
-        let mut params = unsafe { sys::whisper_context_default_params() };
-        params.use_gpu = use_gpu;
-        params.flash_attn = flash_attn && !aligned_words;
-        if aligned_words {
-            params.dtw_token_timestamps = true;
-            params.dtw_aheads_preset = alignment_heads(Path::new(path))?;
-        }
-        // SAFETY: `c_path` is a valid C string for the duration of the call.
-        let ptr = catch_exceptions(|| unsafe {
-            whisper_init_from_file_with_params_no_state(c_path.as_ptr(), params)
-        })?;
-        NonNull::new(ptr)
+/// A loaded model. Shared across threads: each decode has its own stream.
+pub(crate) struct Recognizer(NonNull<sys::OfflineRecognizer>);
+
+// SAFETY: sherpa-onnx only reads the recognizer after loading, and ONNX
+// Runtime sessions allow concurrent runs.
+unsafe impl Send for Recognizer {}
+unsafe impl Sync for Recognizer {}
+
+impl Recognizer {
+    /// Load a Parakeet TDT model from the files in `dir`. ONNX Runtime runs a
+    /// decode on `num_threads` threads; with 1, on the calling thread only.
+    pub(crate) fn load(dir: &Path, num_threads: c_int) -> Result<Self, NativeError> {
+        let path = |file: &str| {
+            let path = dir.join(file);
+            // sherpa-onnx only logs which file is missing; name it in the error.
+            if !path.is_file() {
+                return Err(NativeError::Failed(format!("missing {}", path.display())));
+            }
+            CString::new(path.to_string_lossy().into_owned())
+                .map_err(|_| NativeError::Failed("model path contains a NUL byte".to_string()))
+        };
+        let encoder = path(ENCODER_FILE)?;
+        let decoder = path(DECODER_FILE)?;
+        let joiner = path(JOINER_FILE)?;
+        let tokens = path(TOKENS_FILE)?;
+        // SAFETY: a plain C struct of pointers and numbers, for which all-zero
+        // (null / 0) means "unset, use the default" to the C API.
+        let mut config: sys::OfflineRecognizerConfig = unsafe { std::mem::zeroed() };
+        config.feat_config.sample_rate = SAMPLE_RATE_HZ;
+        config.feat_config.feature_dim = FEATURE_DIM;
+        config.model_config.transducer.encoder = encoder.as_ptr();
+        config.model_config.transducer.decoder = decoder.as_ptr();
+        config.model_config.transducer.joiner = joiner.as_ptr();
+        config.model_config.tokens = tokens.as_ptr();
+        config.model_config.model_type = MODEL_TYPE.as_ptr();
+        config.model_config.num_threads = num_threads;
+        // SAFETY: `config` and the strings it points to outlive the call; the
+        // C API copies what it keeps.
+        let ptr = catch_exceptions(|| unsafe { SherpaOnnxCreateOfflineRecognizer(&config) })?;
+        NonNull::new(ptr.cast_mut())
             .map(Self)
-            .ok_or_else(|| NativeError::Failed(format!("whisper.cpp could not load {path}")))
-    }
-}
-
-impl Drop for Context {
-    fn drop(&mut self) {
-        let ptr = self.0.as_ptr();
-        // SAFETY: owned pointer, freed once; every `State` holds an Arc to
-        // this context, so none outlives it.
-        if let Err(e) = catch_exceptions(|| unsafe { whisper_free(ptr) }) {
-            log::error!("leaking whisper context: {e}");
-        }
-    }
-}
-
-/// whisper.cpp's alignment-head preset for the model at `path`, identified
-/// by its layer counts and vocabulary.
-fn alignment_heads(path: &Path) -> Result<sys::whisper_alignment_heads_preset, NativeError> {
-    let mut header = [0u8; MODEL_HEADER_LEN];
-    File::open(path)
-        .and_then(|mut f| f.read_exact(&mut header))
-        .map_err(|e| NativeError::Failed(format!("can't read model header: {e}")))?;
-    let word = |i: usize| {
-        [
-            header[i * 4],
-            header[i * 4 + 1],
-            header[i * 4 + 2],
-            header[i * 4 + 3],
-        ]
-    };
-    if u32::from_le_bytes(word(0)) != GGML_MAGIC {
-        return Err(NativeError::Failed("not a ggml whisper model".to_string()));
-    }
-    let hparam = |i: usize| i32::from_le_bytes(word(i + 1));
-    let (n_vocab, n_audio_layer, n_text_layer, n_mels) =
-        (hparam(0), hparam(4), hparam(8), hparam(9));
-    let english = n_vocab == N_VOCAB_ENGLISH;
-    let preset = match (n_audio_layer, n_text_layer, english) {
-        (4, 4, true) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_TINY_EN,
-        (4, 4, false) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_TINY,
-        (6, 6, true) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_BASE_EN,
-        (6, 6, false) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_BASE,
-        (12, 12, true) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_SMALL_EN,
-        (12, 12, false) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_SMALL,
-        (24, 24, true) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_MEDIUM_EN,
-        (24, 24, false) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_MEDIUM,
-        (32, 4, false) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_LARGE_V3_TURBO,
-        // large v1 and v2 have the same shape; v2 is the one in use
-        (32, 32, false) if n_mels == N_MELS_LARGE_V3 => {
-            sys::whisper_alignment_heads_preset_WHISPER_AHEADS_LARGE_V3
-        }
-        (32, 32, false) => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_LARGE_V2,
-        _ => {
-            return Err(NativeError::Failed(format!(
-                "no alignment heads known for a model with {n_audio_layer}/{n_text_layer} layers"
-            )))
-        }
-    };
-    Ok(preset)
-}
-
-/// Inference parameters; borrows the language string they point at.
-pub(crate) struct FullParams<'a> {
-    raw: sys::whisper_full_params,
-    _language: PhantomData<&'a CStr>,
-}
-
-impl<'a> FullParams<'a> {
-    pub(crate) fn greedy(language: &'a CStr) -> Self {
-        Self::with_strategy(
-            sys::whisper_sampling_strategy_WHISPER_SAMPLING_GREEDY,
-            language,
-        )
+            .ok_or_else(|| NativeError::Failed("sherpa-onnx could not load the model".to_string()))
     }
 
-    pub(crate) fn beam_search(language: &'a CStr, beam_size: c_int) -> Self {
-        let mut params = Self::with_strategy(
-            sys::whisper_sampling_strategy_WHISPER_SAMPLING_BEAM_SEARCH,
-            language,
-        );
-        params.raw.beam_search.beam_size = beam_size;
-        params
-    }
-
-    fn with_strategy(strategy: sys::whisper_sampling_strategy, language: &'a CStr) -> Self {
-        // SAFETY: plain value constructor.
-        let mut raw = unsafe { sys::whisper_full_default_params(strategy) };
-        raw.language = language.as_ptr();
-        Self {
-            raw,
-            _language: PhantomData,
-        }
-    }
-
-    /// Text the decoder treats as coming just before the audio (the
-    /// transcript so far), for consistent spelling and style across passes.
-    pub(crate) fn set_prompt(&mut self, prompt: &'a CStr) {
-        self.raw.initial_prompt = prompt.as_ptr();
-    }
-
-    /// Plain fields to tune. Leave the pointer fields (`language`,
-    /// `initial_prompt`, callbacks) alone: their lifetimes aren't tracked.
-    pub(crate) fn raw_mut(&mut self) -> &mut sys::whisper_full_params {
-        &mut self.raw
-    }
-}
-
-/// One segment as whisper.cpp reports it; times in centiseconds.
-pub(crate) struct RawSegment {
-    pub t0: i64,
-    pub t1: i64,
-    pub text: String,
-    /// Empty unless the params enabled `token_timestamps` or the context
-    /// was loaded with `aligned_words`.
-    pub words: Vec<RawWord>,
-}
-
-/// A word assembled from whisper tokens; times in centiseconds.
-#[derive(Debug, PartialEq)]
-pub(crate) struct RawWord {
-    pub t0: i64,
-    pub t1: i64,
-    pub text: String,
-}
-
-/// Per-inference working memory (KV caches, compute buffers) for a `Context`.
-pub(crate) struct State {
-    ptr: NonNull<sys::whisper_state>,
-    ctx: Arc<Context>,
-}
-
-// SAFETY: a state is only used through &mut self, from one thread at a time.
-unsafe impl Send for State {}
-
-impl State {
-    pub(crate) fn new(ctx: Arc<Context>) -> Result<Self, NativeError> {
-        let raw_ctx = ctx.0.as_ptr();
-        // SAFETY: `raw_ctx` is a live context, kept alive by `ctx`.
-        let ptr = catch_exceptions(|| unsafe { whisper_init_state(raw_ctx) })?;
-        NonNull::new(ptr)
-            .map(|ptr| Self { ptr, ctx })
-            .ok_or_else(|| NativeError::Failed("could not allocate inference state".to_string()))
-    }
-
-    /// Run full inference over `samples` (16 kHz mono f32), replacing the
-    /// previous result.
-    pub(crate) fn full(
-        &mut self,
-        params: &FullParams<'_>,
-        samples: &[f32],
-    ) -> Result<(), NativeError> {
-        let n_samples = c_int::try_from(samples.len())
-            .map_err(|_| NativeError::Failed("audio buffer too long".to_string()))?;
-        let (ctx, state, raw) = (self.ctx.0.as_ptr(), self.ptr.as_ptr(), params.raw);
-        // SAFETY: live context/state; `samples` and the strings `raw` points
-        // at outlive the call.
-        let rc = catch_exceptions(|| unsafe {
-            whisper_full_with_state(ctx, state, raw, samples.as_ptr(), n_samples)
-        })?;
-        if rc != 0 {
-            return Err(NativeError::Failed(format!("whisper_full returned {rc}")));
-        }
-        Ok(())
-    }
-
-    /// Segments from the last successful `full`.
-    pub(crate) fn segments(&self) -> Vec<RawSegment> {
-        let (ctx, state) = (self.ctx.0.as_ptr(), self.ptr.as_ptr());
-        // SAFETY (all calls below): live context/state, indices below the
-        // reported counts; these accessors don't throw.
-        let n = unsafe { sys::whisper_full_n_segments_from_state(state) };
-        let eot = unsafe { sys::whisper_token_eot(ctx) };
-        (0..n)
-            .map(|i| unsafe {
-                let t0 = sys::whisper_full_get_segment_t0_from_state(state, i);
-                let n_tokens = sys::whisper_full_n_tokens_from_state(state, i);
-                // DTW times (-1 without DTW) are where the alignment moves on
-                // to the next token, i.e. token ends; a token starts where the
-                // one before it ended. Punctuation's DTW times are noise (often
-                // past the pause after it), so it takes no time.
-                let mut prev_dtw_end = t0;
-                // ids from EOT up are special ([_BEG_], timestamps, ...), not text
-                let tokens = (0..n_tokens).filter_map(move |j| {
-                    let data = sys::whisper_full_get_token_data_from_state(state, i, j);
-                    let text = sys::whisper_full_get_token_text_from_state(ctx, state, i, j);
-                    if data.id >= eot || text.is_null() {
-                        return None;
-                    }
-                    let text = CStr::from_ptr(text).to_bytes();
-                    let (start, end) = if data.t_dtw >= 0 {
-                        if text.iter().any(u8::is_ascii_alphanumeric) || !text.is_ascii() {
-                            let start = std::mem::replace(&mut prev_dtw_end, data.t_dtw);
-                            (start, data.t_dtw)
-                        } else {
-                            (prev_dtw_end, prev_dtw_end)
-                        }
-                    } else {
-                        (data.t0, data.t1)
-                    };
-                    Some((start, end, text))
-                });
-                RawSegment {
-                    t0,
-                    t1: sys::whisper_full_get_segment_t1_from_state(state, i),
-                    text: c_str_lossy(sys::whisper_full_get_segment_text_from_state(state, i)),
-                    words: group_words(tokens),
-                }
-            })
-            .collect()
-    }
-}
-
-/// Merge tokens `(t0, t1, text bytes)` into words: a token starting with a
-/// space starts a new word, anything else (word pieces, punctuation) extends
-/// the current one. Bytes are joined before decoding because whisper splits
-/// multi-byte UTF-8 characters across tokens.
-fn group_words<'a>(tokens: impl Iterator<Item = (i64, i64, &'a [u8])>) -> Vec<RawWord> {
-    let mut words = Vec::new();
-    let mut current: Option<(i64, i64, Vec<u8>)> = None;
-    for (t0, t1, text) in tokens {
-        match current.as_mut() {
-            Some((_, end, bytes)) if text.first() != Some(&b' ') => {
-                *end = (*end).max(t1);
-                bytes.extend_from_slice(text);
+    /// Recognize 16 kHz mono `samples` in one decode. Must not be empty
+    /// (ONNX Runtime throws).
+    pub(crate) fn recognize(&self, samples: &[f32]) -> Result<Vec<Token>, NativeError> {
+        let n = c_int::try_from(samples.len())
+            .map_err(|_| NativeError::Failed("audio too long for one decode".to_string()))?;
+        let recognizer = self.0.as_ptr().cast_const();
+        let stream = Stream::new(recognizer)?;
+        let stream_ptr = stream.0.as_ptr().cast_const();
+        // SAFETY: the recognizer and stream are live, `samples` holds `n` floats.
+        let json = catch_exceptions(|| unsafe {
+            SherpaOnnxAcceptWaveformOffline(stream_ptr, SAMPLE_RATE_HZ, samples.as_ptr(), n);
+            SherpaOnnxDecodeOfflineStream(recognizer, stream_ptr);
+            let json = SherpaOnnxGetOfflineStreamResultAsJson(stream_ptr);
+            if json.is_null() {
+                return None;
             }
-            _ => {
-                words.extend(current.take().and_then(finish_word));
-                current = Some((t0, t1, text.to_vec()));
-            }
-        }
-    }
-    words.extend(current.and_then(finish_word));
-    words
-}
-
-fn finish_word((t0, t1, bytes): (i64, i64, Vec<u8>)) -> Option<RawWord> {
-    let text = String::from_utf8_lossy(&bytes).trim().to_string();
-    (!text.is_empty()).then_some(RawWord { t0, t1, text })
-}
-
-/// # Safety
-/// `ptr` is null or a valid NUL-terminated string.
-unsafe fn c_str_lossy(ptr: *const c_char) -> String {
-    if ptr.is_null() {
-        String::new()
-    } else {
-        // SAFETY: per the contract above.
-        unsafe { CStr::from_ptr(ptr) }
-            .to_string_lossy()
-            .into_owned()
+            let out = CStr::from_ptr(json).to_string_lossy().into_owned();
+            SherpaOnnxDestroyOfflineStreamResultJson(json);
+            Some(out)
+        })?
+        .ok_or_else(|| NativeError::Failed("no recognition result".to_string()))?;
+        tokens_from_json(&json)
     }
 }
 
-impl Drop for State {
+impl Drop for Recognizer {
     fn drop(&mut self) {
-        let ptr = self.ptr.as_ptr();
+        let ptr = self.0.as_ptr().cast_const();
         // SAFETY: owned pointer, freed once.
-        if let Err(e) = catch_exceptions(|| unsafe { whisper_free_state(ptr) }) {
-            log::error!("leaking whisper state: {e}");
+        if let Err(e) = catch_exceptions(|| unsafe { SherpaOnnxDestroyOfflineRecognizer(ptr) }) {
+            log::error!("leaking recognizer: {e}");
         }
     }
 }
 
-/// Route whisper.cpp and ggml logs (one callback covers both) to `log`.
-pub(crate) fn install_logging() {
-    // SAFETY: the callback is a static fn and ignores user_data.
-    unsafe { sys::whisper_log_set(Some(log_trampoline), std::ptr::null_mut()) }
+/// One decode's input and result.
+struct Stream(NonNull<sys::OfflineStream>);
+
+impl Stream {
+    fn new(recognizer: *const sys::OfflineRecognizer) -> Result<Self, NativeError> {
+        // SAFETY: `recognizer` is live (borrowed from a `Recognizer`).
+        let ptr = catch_exceptions(|| unsafe { SherpaOnnxCreateOfflineStream(recognizer) })?;
+        NonNull::new(ptr.cast_mut())
+            .map(Self)
+            .ok_or_else(|| NativeError::Failed("could not create a recognizer stream".to_string()))
+    }
 }
 
-unsafe extern "C" fn log_trampoline(
-    level: sys::ggml_log_level,
-    text: *const c_char,
-    _: *mut c_void,
-) {
-    if text.is_null() {
-        return;
+impl Drop for Stream {
+    fn drop(&mut self) {
+        let ptr = self.0.as_ptr().cast_const();
+        // SAFETY: owned pointer, freed once.
+        if let Err(e) = catch_exceptions(|| unsafe { SherpaOnnxDestroyOfflineStream(ptr) }) {
+            log::error!("leaking recognizer stream: {e}");
+        }
     }
-    // SAFETY: whisper.cpp passes a NUL-terminated message.
-    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
-    let text = text.trim();
-    if text.is_empty() {
-        return;
+}
+
+fn tokens_from_json(json: &str) -> Result<Vec<Token>, NativeError> {
+    let raw: RawResult = serde_json::from_str(json)
+        .map_err(|e| NativeError::Failed(format!("unreadable recognition result: {e}")))?;
+    let (Some(starts), Some(durations)) = (raw.timestamps, raw.durations) else {
+        return Err(NativeError::Failed(
+            "recognition result has no token times".to_string(),
+        ));
+    };
+    if starts.len() != raw.tokens.len() || durations.len() != raw.tokens.len() {
+        return Err(NativeError::Failed(
+            "recognition result's token times don't match its tokens".to_string(),
+        ));
     }
-    match level {
-        sys::ggml_log_level_GGML_LOG_LEVEL_ERROR => log::error!("{text}"),
-        sys::ggml_log_level_GGML_LOG_LEVEL_WARN => log::warn!("{text}"),
-        sys::ggml_log_level_GGML_LOG_LEVEL_INFO => log::info!("{text}"),
-        sys::ggml_log_level_GGML_LOG_LEVEL_DEBUG => log::debug!("{text}"),
-        // NONE / CONT (continuation of the previous line) / unknown
-        _ => log::trace!("{text}"),
-    }
+    Ok(raw
+        .tokens
+        .into_iter()
+        .zip(starts.into_iter().zip(durations))
+        .map(|(text, (start_s, duration_s))| Token {
+            text,
+            start_s,
+            duration_s,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -456,36 +278,43 @@ mod tests {
     #[test]
     fn cpp_exception_becomes_error() {
         // SAFETY: valid C string; the throw is what's under test.
-        let err = catch_exceptions(|| unsafe { lr_throw_for_test(c"device lost".as_ptr()) });
-        assert!(matches!(err, Err(NativeError::Exception(msg)) if msg == "device lost"));
-    }
-
-    #[test]
-    fn tokens_group_into_words() {
-        let tokens: [(i64, i64, &[u8]); 5] = [
-            (0, 40, b" Hello"),
-            (40, 45, b","),
-            (50, 70, b" wor"),
-            (70, 90, b"ld"),
-            (90, 95, b"."),
-        ];
-        let words = group_words(tokens.into_iter());
-        let word = |t0, t1, text: &str| RawWord {
-            t0,
-            t1,
-            text: text.to_string(),
-        };
-        assert_eq!(words, [word(0, 45, "Hello,"), word(50, 95, "world.")]);
-    }
-
-    #[test]
-    fn utf8_split_across_tokens_is_rejoined() {
-        let tokens: [(i64, i64, &[u8]); 2] = [(0, 10, b" caf\xc3"), (10, 20, b"\xa9")];
-        assert_eq!(group_words(tokens.into_iter())[0].text, "café");
+        let err = catch_exceptions(|| unsafe { lr_throw_for_test(c"bad input".as_ptr()) });
+        assert!(matches!(err, Err(NativeError::Exception(msg)) if msg == "bad input"));
     }
 
     #[test]
     fn result_passes_through() {
         assert_eq!(catch_exceptions(|| 7).ok(), Some(7));
+    }
+
+    #[test]
+    fn json_result_becomes_tokens() {
+        let json = r#"{"lang": "", "text": " Hi.", "tokens": [" Hi", "."],
+            "timestamps": [0.4, 0.64], "durations": [0.24, 0.08], "words": []}"#;
+        let tokens = tokens_from_json(json).ok();
+        assert_eq!(
+            tokens,
+            Some(vec![
+                Token {
+                    text: " Hi".to_string(),
+                    start_s: 0.4,
+                    duration_s: 0.24
+                },
+                Token {
+                    text: ".".to_string(),
+                    start_s: 0.64,
+                    duration_s: 0.08
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn json_result_without_times_is_an_error() {
+        let json = r#"{"text": "Hi", "tokens": [" Hi"]}"#;
+        assert!(matches!(
+            tokens_from_json(json),
+            Err(NativeError::Failed(_))
+        ));
     }
 }

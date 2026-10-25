@@ -1,4 +1,4 @@
-//! On-device Whisper transcription engine.
+//! On-device speech transcription engine: Parakeet TDT run by sherpa-onnx.
 //!
 //! Exposed to Kotlin via uniffi. Audio comes in as 16 kHz mono signed 16-bit
 //! little-endian PCM bytes (`ByteArray` on the Kotlin side — uniffi's only
@@ -8,6 +8,7 @@ uniffi::setup_scaffolding!();
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+mod chunks;
 mod engine;
 mod native;
 mod ogg;
@@ -16,15 +17,16 @@ mod opus_file;
 mod session;
 mod speakers;
 mod vtt;
+mod words;
 
-pub use engine::{EngineConfig, Segment, WhisperEngine, WhisperEngineError, Word};
+pub use engine::{Segment, SpeechEngine, WhisperEngineError, Word};
 pub use opus_file::{recording_duration_ms, RecordingFile, RecordingStream, RecordingWriter};
 pub use session::LiveSession;
 pub use speakers::SpeakerEncoder;
 pub use vtt::{transcript_from_vtt, transcript_to_vtt};
 
-/// Route whisper.cpp / engine logs to logcat (or env_logger on host).
-/// Call once from Kotlin before creating an engine.
+/// Route engine logs to logcat (or env_logger on host); sherpa-onnx logs to
+/// logcat itself. Call once from Kotlin before creating an engine.
 #[uniffi::export]
 pub fn init_logging() {
     #[cfg(target_os = "android")]
@@ -39,7 +41,6 @@ pub fn init_logging() {
             .filter_level(log::LevelFilter::Info)
             .try_init();
     }
-    native::install_logging();
 }
 
 /// Lock, ignoring poisoning: every guarded value here stays consistent if a
@@ -48,7 +49,7 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Convert s16le PCM bytes to the f32 samples whisper.cpp expects.
+/// Convert s16le PCM bytes to the f32 samples the engine works on.
 pub(crate) fn pcm16_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
         .chunks_exact(2)

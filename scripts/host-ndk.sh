@@ -5,9 +5,6 @@
 # per-API target scripts (aarch64-linux-android31-clang, ...) are reused as-is:
 # they only call "$bin_dir/clang".
 #
-# Also fetches Vulkan-Headers: the NDK sysroot has no vulkan.hpp, which ggml's
-# Vulkan backend includes. The clang wrappers put it ahead of the sysroot.
-#
 # Prints the stand-in NDK path; rebuilt on every run (only symlinks/wrappers).
 #   ANDROID_NDK_HOME=$(scripts/host-ndk.sh "$ANDROID_NDK_HOME")
 set -euo pipefail
@@ -15,8 +12,6 @@ set -euo pipefail
 REAL_NDK="${1:?usage: host-ndk.sh <real NDK path>}"
 CACHE="${LOCALRECORD_CACHE:-$HOME/.cache/localrecord}"
 LLVM_VERSION="${HOST_LLVM_VERSION:-18}"
-# Needs VK_HEADER_VERSION >= 301 for the vk::detail dispatcher ggml uses.
-VULKAN_HEADERS_TAG="v1.4.335"
 # Host LLVM tools swapped in for the NDK's x86_64 ones (as <tool>-$LLVM_VERSION).
 HOST_TOOLS=(llvm-ar llvm-ranlib llvm-strip llvm-objcopy llvm-objdump llvm-nm
     llvm-readelf llvm-readobj llvm-size llvm-strings llvm-symbolizer
@@ -30,14 +25,6 @@ host_res="$("$host_clang" -print-resource-dir)"
 
 real_prebuilt="$REAL_NDK/toolchains/llvm/prebuilt/linux-x86_64"
 ndk_res="$(echo "$real_prebuilt"/lib/clang/*)"
-
-vk_headers="$CACHE/Vulkan-Headers-$VULKAN_HEADERS_TAG"
-if [ ! -f "$vk_headers/include/vulkan/vulkan.hpp" ]; then
-    log "==> Fetching Vulkan-Headers $VULKAN_HEADERS_TAG"
-    rm -rf "$vk_headers"
-    git -c advice.detachedHead=false clone -q --depth 1 --branch "$VULKAN_HEADERS_TAG" \
-        https://github.com/KhronosGroup/Vulkan-Headers "$vk_headers" >&2
-fi
 
 ndk="$CACHE/host-ndk/$(basename "$REAL_NDK")"
 rm -rf "$ndk"
@@ -76,7 +63,7 @@ if [ "\$1" = "-cc1" ]; then
     exec "$driver" "\$@"
 fi
 exec "$driver" -resource-dir="$res" --sysroot="$prebuilt/sysroot" \\
-    -isystem "$vk_headers/include" --rtlib=compiler-rt --unwindlib=libunwind \\
+    --rtlib=compiler-rt --unwindlib=libunwind \\
     -Wno-unused-command-line-argument "\$@"
 EOF
     chmod +x "$prebuilt/bin/$name"

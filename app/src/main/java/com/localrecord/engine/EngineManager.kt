@@ -3,62 +3,39 @@ package com.localrecord.engine
 import android.content.Context
 import android.util.Log
 import com.localrecord.model.ModelDownloader
-import uniffi.whisper_engine.EngineConfig
 import uniffi.whisper_engine.SpeakerEncoder
-import uniffi.whisper_engine.WhisperEngine
+import uniffi.whisper_engine.SpeechEngine
 import uniffi.whisper_engine.WhisperEngineException
 import uniffi.whisper_engine.initLogging
 
 /**
- * Owns the single loaded Whisper model. Loading is expensive (model read +
- * Vulkan pipeline setup), so the engine is created once and reused across
- * recordings. All transcription logic lives in Rust; this class only manages
- * lifecycle.
+ * Owns the loaded models. The speech model (Parakeet, ~1.2 GB in memory) is
+ * loaded once and shared by live sessions and final passes, which may run
+ * at the same time. All transcription logic lives in Rust; this class only
+ * manages lifecycle.
  */
 object EngineManager {
 
     private const val TAG = "EngineManager"
 
     @Volatile
-    private var engine: WhisperEngine? = null
+    private var engine: SpeechEngine? = null
 
     @Volatile
     private var speakers: SpeakerEncoder? = null
 
-    @Volatile
-    private var finalEngine: WhisperEngine? = null
-
     /**
-     * Load the engine if the model file is present. Returns null when the
+     * Load the speech engine if its model is present. Returns null when the
      * model hasn't been downloaded yet; throws [WhisperEngineException] if it
      * fails to load. Blocking — call off the main thread.
      */
     @Synchronized
-    fun getOrLoad(context: Context): WhisperEngine? {
+    fun getOrLoad(context: Context): SpeechEngine? {
         engine?.let { return it }
-        val modelFile = ModelDownloader.modelFile(context)
-        if (!modelFile.exists()) return null
+        if (!ModelDownloader.speechModelReady(context)) return null
         initLogging()
-        val config = EngineConfig(useGpu = true, numThreads = 4u, language = "en")
-        return WhisperEngine(modelFile.absolutePath, config).also { engine = it }
-    }
-
-    /**
-     * The engine for final whole-recording passes (small.en), loaded on first
-     * use; null when its model isn't downloaded, in which case the live
-     * transcript stands. Throws [WhisperEngineException] if it fails to load.
-     * Blocking.
-     */
-    @Synchronized
-    fun finalEngineOrLoad(context: Context): WhisperEngine? {
-        finalEngine?.let { return it }
-        val modelFile = ModelDownloader.finalModelFile(context)
-        if (!modelFile.exists()) return null
-        initLogging()
-        // Aligned word times drive playback highlighting. 2 CPU threads: the
-        // pass runs in the background while the phone is in use.
-        val config = EngineConfig(useGpu = true, numThreads = 2u, language = "en", alignedWords = true)
-        return WhisperEngine(modelFile.absolutePath, config).also { finalEngine = it }
+        val modelDir = ModelDownloader.speechModelDir(context)
+        return SpeechEngine(modelDir.absolutePath).also { engine = it }
     }
 
     /**

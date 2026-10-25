@@ -8,7 +8,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ABIS="${ABIS:-arm64-v8a}"
-# Matches minSdk in app/build.gradle.kts (NDK libvulkan.so stubs start at 24).
+# Matches minSdk in app/build.gradle.kts.
 export ANDROID_PLATFORM="31"
 # Google Play requires 16 KB-aligned native libs; NDK r28's clang defaults to
 # it, the host clang used on aarch64 doesn't.
@@ -37,7 +37,7 @@ echo "==> Generating Kotlin bindings"
     --language kotlin \
     --out-dir "$REPO_ROOT/app/src/main/java")
 
-echo "==> Android build (Vulkan) for: $ABIS"
+echo "==> Android build for: $ABIS"
 # The NDK's clang is x86_64-only; on aarch64 hosts build with a stand-in NDK
 # that runs the host's clang against the real NDK's sysroot.
 if [ "$(uname -m)" = aarch64 ]; then
@@ -50,15 +50,17 @@ for abi in $ABIS; do
     triple="$(abi_triple "$abi")"
     export "CARGO_TARGET_$(echo "$triple" | tr a-z- A-Z_)_RUSTFLAGS=$PAGE_SIZE_RUSTFLAGS"
 done
-# whisper-rs-sys links libc++_shared.so, so it has to ship in jniLibs too.
+# src/catch.cpp (C++, built by the cc crate) links libc++_shared.so, so it
+# has to ship in jniLibs too.
 (cd "$REPO_ROOT/rust-engine" && \
     CMAKE_TOOLCHAIN_FILE="$REPO_ROOT/scripts/android-toolchain.cmake" \
     cargo ndk "${ndk_targets[@]}" -P "$ANDROID_PLATFORM" --link-libcxx-shared \
     -o "$REPO_ROOT/app/src/main/jniLibs" \
-    build --release --features vulkan)
+    build --release)
 
-# sherpa-onnx (speaker voiceprints) links these prebuilt libs dynamically on
-# Android; its build script drops them next to the target's build output.
+# sherpa-onnx (speech recognition, speaker voiceprints) links these prebuilt
+# libs dynamically on Android; its build script drops them next to the
+# target's build output.
 for abi in $ABIS; do
     triple="$(abi_triple "$abi")"
     for lib in libsherpa-onnx-c-api.so libonnxruntime.so; do
