@@ -13,11 +13,13 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
+import android.text.format.DateUtils
 import android.util.Log
 import android.widget.Toast
 import com.localrecord.MainActivity
@@ -25,6 +27,7 @@ import com.localrecord.R
 import com.localrecord.data.RecordingRepository
 import com.localrecord.engine.EngineManager
 import com.localrecord.model.ModelDownloader
+import com.localrecord.ui.formatElapsed
 import uniffi.whisper_engine.LiveSession
 import uniffi.whisper_engine.RecordingWriter
 import uniffi.whisper_engine.Segment
@@ -68,7 +71,17 @@ class RecordingService : Service() {
 
         const val SAMPLE_RATE_HZ = 16_000
         private const val TAG = "RecordingService"
-        private const val CHANNEL_ID = "recording"
+        /**
+         * Default importance, no sound: sorts above the shade's silent section.
+         * An existing channel's importance can't be raised, so not [LEGACY_CHANNEL_ID].
+         */
+        private const val CAPTURE_CHANNEL_ID = "capture"
+        /** Low importance: the final pass is background work. */
+        private const val FINAL_PASS_CHANNEL_ID = "final_pass"
+        /** Low-importance channel of older installs; deleted on service start. */
+        private const val LEGACY_CHANNEL_ID = "recording"
+        /** `Notification.EXTRA_REQUEST_PROMOTED_ONGOING` (API 36.1; compileSdk 36 lacks it). */
+        private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
         private const val NOTIFICATION_ID = 1
         /** 100 ms of 16 kHz mono s16 audio per read. */
         private const val READ_BUFFER_BYTES = SAMPLE_RATE_HZ / 10 * 2
@@ -128,6 +141,11 @@ class RecordingService : Service() {
     private val captureChanged = captureLock.newCondition()
     /** Alive from start until the file and live transcript are saved. Main thread only. */
     private var captureThread: Thread? = null
+    /** Wall-clock time the current recording was started. Main thread only. */
+    private var startedAtMs = 0L
+    /** Audio recorded so far (pauses don't count). Written by the capture thread. */
+    @Volatile
+    private var recordedMs = 0L
 
     /**
      * Final passes run one at a time, off the capture thread, at background
@@ -146,15 +164,31 @@ class RecordingService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.deleteNotificationChannel(LEGACY_CHANNEL_ID)
+        manager.createNotificationChannel(
+            NotificationChannel(CAPTURE_CHANNEL_ID, "Recording", NotificationManager.IMPORTANCE_DEFAULT)
+                .apply {
+                    setSound(null, null)
+                    enableVibration(false)
+                }
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(FINAL_PASS_CHANNEL_ID, "Refining transcripts", NotificationManager.IMPORTANCE_LOW)
+        )
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val active = captureThread?.isAlive == true
         when (intent?.action) {
             ACTION_START -> if (!active) startRecording()
             // The capture thread saves the recording and the live draft.
             ACTION_STOP -> if (active) signalCapture { capturing = false } else stopIfIdle()
+            // The capture thread updates the notification once the mic is off / on.
             ACTION_PAUSE, ACTION_RESUME -> if (active && capturing) {
                 signalCapture { paused = intent.action == ACTION_PAUSE }
-                updateForeground()
             } else {
                 stopIfIdle()
             }
@@ -169,6 +203,8 @@ class RecordingService : Service() {
     private fun startRecording() {
         capturing = true
         paused = false
+        startedAtMs = System.currentTimeMillis()
+        recordedMs = 0L
         updateForeground()
         val audioFile = RecordingRepository.newRecordingFile(this)
         // Model load (first use) and transcription flush block; keep them off
@@ -319,6 +355,16 @@ class RecordingService : Service() {
             publish(live.drainSegments())
             RecordingState.setTentative(live.tentative())
         }
+        // Pause state the UI and notification show; null until capture starts.
+        var shownPaused: Boolean? = null
+        val showPaused = { nowPaused: Boolean ->
+            if (shownPaused != nowPaused) {
+                shownPaused = nowPaused
+                RecordingState.onPaused(nowPaused)
+                // Re-bases the notification's timer on the audio actually recorded.
+                mainHandler.post { updateForeground() }
+            }
+        }
         try {
             RecordingWriter(audioFile.path).use { writer ->
                 val buffer = ByteArray(READ_BUFFER_BYTES)
@@ -327,7 +373,7 @@ class RecordingService : Service() {
                 while (capturing) {
                     if (paused) {
                         if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) recorder.stop()
-                        RecordingState.onPaused(true)
+                        showPaused(true)
                         captureLock.withLock {
                             if (paused && capturing) {
                                 captureChanged.await(PAUSED_DRAIN_MS, TimeUnit.MILLISECONDS)
@@ -338,7 +384,7 @@ class RecordingService : Service() {
                     }
                     if (recorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                         recorder.startRecording()
-                        RecordingState.onPaused(false)
+                        showPaused(false)
                     }
                     val read = recorder.read(buffer, 0, buffer.size)
                     if (read < 0) {
@@ -352,7 +398,8 @@ class RecordingService : Service() {
                     session?.feedPcm16(pcm)
                     // Audio time, so pauses don't count.
                     recordedBytes += read
-                    RecordingState.onElapsed(recordedBytes * 1000 / BYTES_PER_SECOND)
+                    recordedMs = recordedBytes * 1000 / BYTES_PER_SECOND
+                    RecordingState.onElapsed(recordedMs)
                     if (session != null && ++reads % DRAIN_EVERY_READS == 0) drain(session)
                 }
                 writer.finish()
@@ -373,15 +420,20 @@ class RecordingService : Service() {
     }
 
     private fun buildNotification(recording: Boolean): Notification {
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "Recording", NotificationManager.IMPORTANCE_LOW)
-        )
         val tapIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE,
         )
+        if (!recording) {
+            return Notification.Builder(this, FINAL_PASS_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_mic)
+                .setContentIntent(tapIntent)
+                .setOngoing(true)
+                .setContentTitle("Finalizing transcript")
+                .setContentText("Re-transcribing the whole recording on-device")
+                .build()
+        }
         val stopIntent = PendingIntent.getService(
             this, 1,
             Intent(this, RecordingService::class.java).setAction(ACTION_STOP),
@@ -393,22 +445,27 @@ class RecordingService : Service() {
             Intent(this, RecordingService::class.java).setAction(pauseAction),
             PendingIntent.FLAG_IMMUTABLE,
         )
-        val builder = Notification.Builder(this, CHANNEL_ID)
+        val startedAt = DateUtils.formatDateTime(this, startedAtMs, DateUtils.FORMAT_SHOW_TIME)
+        val builder = Notification.Builder(this, CAPTURE_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_mic)
             .setContentIntent(tapIntent)
             .setOngoing(true)
-        return if (recording) {
-            builder.setContentTitle(if (paused) "Recording paused" else "Recording")
-                .setContentText(if (paused) "Mic off" else "Transcribing on-device")
-                .addAction(
-                    Notification.Action.Builder(null, if (paused) "Resume" else "Pause", pauseIntent).build()
-                )
-                .addAction(Notification.Action.Builder(null, "Stop", stopIntent).build())
-                .build()
+            .setOnlyAlertOnce(true)
+            .addExtras(Bundle().apply { putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true) })
+        if (paused) {
+            builder.setContentTitle("Recording paused")
+                .setContentText("${formatElapsed(recordedMs)} recorded · started $startedAt · mic off")
         } else {
-            builder.setContentTitle("Finalizing transcript")
-                .setContentText("Re-transcribing the whole recording on-device")
-                .build()
+            // The shade ticks a chronometer from `when` itself: no per-second updates.
+            builder.setContentTitle("Recording")
+                .setContentText("Started $startedAt · transcribing on-device")
+                .setWhen(System.currentTimeMillis() - recordedMs)
+                .setUsesChronometer(true)
+                .setShowWhen(true)
         }
+        return builder
+            .addAction(Notification.Action.Builder(null, if (paused) "Resume" else "Pause", pauseIntent).build())
+            .addAction(Notification.Action.Builder(null, "Stop", stopIntent).build())
+            .build()
     }
 }
