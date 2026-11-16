@@ -1,5 +1,6 @@
 package com.localrecord.ui
 
+import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -345,12 +346,13 @@ private fun RecordingRow(
         Column(Modifier.weight(1f)) {
             Text(recording.name, style = MaterialTheme.typography.bodyLarge)
             Text(
-                formatElapsed(recording.durationMs) + when {
-                    finalizing -> " · finalizing transcript…"
-                    finalizeFailed -> " · transcription failed"
-                    recording.transcriptFile != null -> " · transcribed"
-                    else -> ""
-                },
+                formatElapsed(recording.durationMs) +
+                    " · " + Formatter.formatShortFileSize(context, recording.sizeBytes) + when {
+                        finalizing -> " · finalizing transcript…"
+                        finalizeFailed -> " · transcription failed"
+                        recording.transcriptFile == null -> " · no transcript"
+                        else -> ""
+                    },
                 style = MaterialTheme.typography.bodySmall,
             )
         }

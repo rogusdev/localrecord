@@ -18,6 +18,8 @@ data class Recording(
     val transcriptFile: File?,
     /** 0 if the file can't be read. */
     val durationMs: Long,
+    /** Audio plus transcript, in bytes. */
+    val sizeBytes: Long,
 ) {
     val name: String get() = audioFile.nameWithoutExtension
 }
@@ -59,10 +61,12 @@ object RecordingRepository {
             // By modification time, not name, so renamed recordings keep their place.
             .sortedByDescending { it.lastModified() }
             .map { audio ->
+                val transcript = transcriptFileFor(audio).takeIf { it.exists() }
                 Recording(
                     audioFile = audio,
-                    transcriptFile = transcriptFileFor(audio).takeIf { it.exists() },
+                    transcriptFile = transcript,
                     durationMs = durationMs(audio),
+                    sizeBytes = audio.length() + (transcript?.length() ?: 0),
                 )
             }
 
